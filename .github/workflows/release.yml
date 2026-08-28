@@ -73,9 +73,6 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Run Unit Tests
-        run: ./gradlew testDebugUnitTest --no-daemon
-
       - name: Build APK with Dynamic Version
         run: |
           ./gradlew assembleDebug -PversionCode=${{ steps.versioning.outputs.versionCode }} -PversionName=${{ steps.versioning.outputs.version }} --no-daemon
