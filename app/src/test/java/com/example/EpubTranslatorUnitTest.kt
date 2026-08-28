@@ -34,7 +34,7 @@ class EpubTranslatorUnitTest {
             TranslationChunkEntity(id = "c4", jobId = "j1", bookId = "book-1", chapterId = "ch-2", chapterOrder = 1, chunkOrder = 1, sourceText = "Chunk 4", translatedText = "Trans 4", status = "COMPLETED"),
             TranslationChunkEntity(id = "c1", jobId = "j1", bookId = "book-1", chapterId = "ch-1", chapterOrder = 0, chunkOrder = 0, sourceText = "Chunk 1", translatedText = "Trans 1", status = "COMPLETED"),
             TranslationChunkEntity(id = "c3", jobId = "j1", bookId = "book-1", chapterId = "ch-2", chapterOrder = 1, chunkOrder = 0, sourceText = "Chunk 3", translatedText = "Trans 3", status = "COMPLETED"),
-            TranslationChunkEntity(id = "c2", jobId = "j1", bookId = "book-1", chapterId = "ch-1", chapterOrder = 1, chunkOrder = 1, sourceText = "Chunk 2", translatedText = "Trans 2", status = "COMPLETED")
+            TranslationChunkEntity(id = "c2", jobId = "j1", bookId = "book-1", chapterId = "ch-1", chapterOrder = 0, chunkOrder = 1, sourceText = "Chunk 2", translatedText = "Trans 2", status = "COMPLETED")
         )
 
         // Sort chunks as required by the architecture: chapterOrder ASC, chunkOrder ASC
