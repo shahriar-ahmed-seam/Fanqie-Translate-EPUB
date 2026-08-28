@@ -29,21 +29,21 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Verify APK exists
         run: |
-          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            echo "Error: Debug APK not generated!"
+            echo "Error: Release APK not generated!"
             exit 1
           fi
-          echo "Verified APK at: $APK_PATH"
+          echo "Verified Release APK at: $APK_PATH"
 
-      - name: Upload Debug APK Artifact
+      - name: Upload Release APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: epub-translator-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: epub-translator-release
+          path: app/build/outputs/apk/release/*.apk
           retention-days: 14

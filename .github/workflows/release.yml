@@ -73,19 +73,19 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Build APK with Dynamic Version
+      - name: Build Release APK with Dynamic Version
         run: |
-          ./gradlew assembleDebug -PversionCode=${{ steps.versioning.outputs.versionCode }} -PversionName=${{ steps.versioning.outputs.version }} --no-daemon
+          ./gradlew assembleRelease -PversionCode=${{ steps.versioning.outputs.versionCode }} -PversionName=${{ steps.versioning.outputs.version }} --no-daemon
 
-      - name: Locate and Rename APK
+      - name: Locate and Rename Release APK
         id: apk
         run: |
-          SRC_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          SRC_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -z "$SRC_APK" ] || [ ! -f "$SRC_APK" ]; then
-            echo "Error: Output APK not found!"
+            echo "Error: Release output APK not found!"
             exit 1
           fi
-          DEST_APK="app/build/outputs/apk/debug/EPUB-Translator-${{ steps.versioning.outputs.tag }}.apk"
+          DEST_APK="app/build/outputs/apk/release/EPUB-Translator-${{ steps.versioning.outputs.tag }}.apk"
           mv "$SRC_APK" "$DEST_APK"
           echo "apk_path=$DEST_APK" >> $GITHUB_OUTPUT
           echo "Renamed APK to $DEST_APK"

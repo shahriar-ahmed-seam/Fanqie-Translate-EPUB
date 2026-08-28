@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.util.Base64
 
 plugins {
   alias(libs.plugins.android.application)
@@ -25,14 +26,30 @@ android {
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      val defaultKeystore = file("${rootDir}/release.keystore")
+      if (!defaultKeystore.exists()) {
+        val base64File = file("${rootDir}/debug.keystore.base64")
+        if (base64File.exists()) {
+          val decoded = Base64.getDecoder().decode(base64File.readText().trim())
+          defaultKeystore.writeBytes(decoded)
+        }
+      }
+      val keystorePath = System.getenv("KEYSTORE_PATH") ?: defaultKeystore.absolutePath
       storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      storePassword = System.getenv("STORE_PASSWORD") ?: "android"
+      keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
+      keyPassword = System.getenv("KEY_PASSWORD") ?: "android"
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      val defaultKeystore = file("${rootDir}/debug.keystore")
+      if (!defaultKeystore.exists()) {
+        val base64File = file("${rootDir}/debug.keystore.base64")
+        if (base64File.exists()) {
+          val decoded = Base64.getDecoder().decode(base64File.readText().trim())
+          defaultKeystore.writeBytes(decoded)
+        }
+      }
+      storeFile = defaultKeystore
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
