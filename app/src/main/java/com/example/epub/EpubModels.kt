@@ -7,7 +7,9 @@ data class EpubMetadata(
     val author: String,
     val description: String,
     val language: String = "zh",
-    val coverHref: String? = null
+    val coverItemId: String? = null,
+    val coverHref: String? = null,
+    val coverFullPath: String? = null
 )
 
 data class ManifestItem(

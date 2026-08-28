@@ -65,3 +65,8 @@ data class TranslationChunkEntity(
     val errorMessage: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 )
+
+data class JobChunkCount(
+    val jobId: String,
+    val count: Int
+)

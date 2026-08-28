@@ -59,9 +59,14 @@ object EpubRebuilder {
             modifiedEntries[originalChapter.fullPathInZip] = translatedXhtml.toByteArray(Charsets.UTF_8)
         }
 
-        // 2. Rebuild OPF with translated metadata
+        // 2. Rebuild OPF with translated metadata and ensure cover integrity
         val translatedOpf = rebuildOpf(originalEpub, metadataTitle, metadataDescription)
         modifiedEntries[originalEpub.opfPath] = translatedOpf.toByteArray(Charsets.UTF_8)
+
+        // Ensure cover image bytes are explicitly copied if present
+        if (originalEpub.metadata.coverFullPath != null && originalEpub.coverBytes != null) {
+            modifiedEntries[originalEpub.metadata.coverFullPath] = originalEpub.coverBytes
+        }
 
         // 3. Rebuild NCX if present
         if (originalEpub.ncxHref != null) {
@@ -186,6 +191,30 @@ object EpubRebuilder {
         val langElem = doc.select("metadata > dc\\:language, metadata > language").first()
         if (langElem != null) {
             langElem.text("en")
+        }
+
+        // Ensure cover meta and manifest properties are preserved
+        val coverItemId = originalEpub.metadata.coverItemId
+        if (coverItemId != null) {
+            // EPUB2: <meta name="cover" content="cover_item_id"/>
+            val metaCover = doc.select("metadata > meta[name=cover]").first()
+            if (metaCover == null) {
+                doc.select("metadata").first()?.appendElement("meta")
+                    ?.attr("name", "cover")
+                    ?.attr("content", coverItemId)
+            } else {
+                metaCover.attr("content", coverItemId)
+            }
+
+            // EPUB3: properties="cover-image" on manifest item
+            val manifestItem = doc.select("manifest > item#$coverItemId, manifest > item[id=$coverItemId]").first()
+            if (manifestItem != null) {
+                val currentProps = manifestItem.attr("properties")
+                if (!currentProps.contains("cover-image", ignoreCase = true)) {
+                    val newProps = if (currentProps.isBlank()) "cover-image" else "$currentProps cover-image"
+                    manifestItem.attr("properties", newProps)
+                }
+            }
         }
 
         return doc.html()

@@ -32,10 +32,10 @@ interface TranslationJobDao {
     @Query("SELECT * FROM translation_jobs WHERE bookId = :bookId LIMIT 1")
     suspend fun getJobByBookId(bookId: String): TranslationJobEntity?
 
-    @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'TRANSLATING') ORDER BY startedAt ASC")
+    @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'RUNNING', 'TRANSLATING') ORDER BY startedAt ASC")
     suspend fun getActiveJobs(): List<TranslationJobEntity>
 
-    @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'TRANSLATING') ORDER BY startedAt ASC")
+    @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'RUNNING', 'TRANSLATING') ORDER BY startedAt ASC")
     fun observeActiveJobs(): Flow<List<TranslationJobEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -46,6 +46,9 @@ interface TranslationJobDao {
 
     @Query("UPDATE translation_jobs SET status = :status, updatedAt = :timestamp WHERE id = :jobId")
     suspend fun updateJobStatus(jobId: String, status: String, timestamp: Long = System.currentTimeMillis())
+
+    @Query("UPDATE translation_jobs SET status = 'QUEUED', updatedAt = :timestamp WHERE status IN ('RUNNING', 'TRANSLATING')")
+    suspend fun resetRunningJobsToQueued(timestamp: Long = System.currentTimeMillis())
 
     @Query("UPDATE translation_jobs SET completedChunks = :completed, failedChunks = :failed, progress = :progress, status = :status, updatedAt = :timestamp WHERE id = :jobId")
     suspend fun updateJobProgress(jobId: String, completed: Int, failed: Int, progress: Float, status: String, timestamp: Long = System.currentTimeMillis())
@@ -86,6 +89,12 @@ interface TranslationChunkDao {
     @Query("SELECT * FROM translation_chunks WHERE jobId IN (:jobIds) AND status = 'PENDING' ORDER BY chapterOrder ASC, chunkOrder ASC LIMIT :limit")
     suspend fun getPendingChunksForJobs(jobIds: List<String>, limit: Int): List<TranslationChunkEntity>
 
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND status = 'PENDING' ORDER BY chapterOrder ASC, chunkOrder ASC LIMIT 1")
+    suspend fun getNextPendingChunkForJob(jobId: String): TranslationChunkEntity?
+
+    @Query("SELECT * FROM translation_chunks WHERE jobId IN (:jobIds) AND status = 'PENDING' ORDER BY chapterOrder ASC, chunkOrder ASC LIMIT 1")
+    suspend fun getNextPendingChunkForJobs(jobIds: List<String>): TranslationChunkEntity?
+
     @Query("SELECT * FROM translation_chunks WHERE id = :id")
     suspend fun getChunkById(id: String): TranslationChunkEntity?
 
@@ -106,14 +115,44 @@ interface TranslationChunkDao {
         timestamp: Long = System.currentTimeMillis()
     )
 
-    @Query("UPDATE translation_chunks SET status = 'PENDING' WHERE status = 'TRANSLATING'")
+    @Query("UPDATE translation_chunks SET status = 'TRANSLATING', updatedAt = :timestamp WHERE id = :id AND status = 'PENDING'")
+    suspend fun claimChunk(id: String, timestamp: Long = System.currentTimeMillis()): Int
+
+    @Transaction
+    suspend fun claimNextPendingChunkForJob(jobId: String): TranslationChunkEntity? {
+        val chunk = getNextPendingChunkForJob(jobId) ?: return null
+        val updated = claimChunk(chunk.id)
+        return if (updated > 0) chunk.copy(status = "TRANSLATING") else null
+    }
+
+    @Transaction
+    suspend fun claimNextPendingChunk(jobIds: List<String>): TranslationChunkEntity? {
+        if (jobIds.isEmpty()) return null
+        val chunk = getNextPendingChunkForJobs(jobIds) ?: return null
+        val updated = claimChunk(chunk.id)
+        return if (updated > 0) chunk.copy(status = "TRANSLATING") else null
+    }
+
+    @Query("UPDATE translation_chunks SET status = 'PENDING' WHERE status = 'TRANSLATING' AND (translatedText IS NULL OR translatedText = '')")
     suspend fun resetTranslatingChunksToPending()
+
+    @Query("UPDATE translation_chunks SET status = 'COMPLETED' WHERE status = 'TRANSLATING' AND (translatedText IS NOT NULL AND translatedText != '')")
+    suspend fun finalizeCompletedTranslatingChunks()
 
     @Query("UPDATE translation_chunks SET status = 'PENDING', retryCount = 0, errorMessage = null WHERE jobId = :jobId AND status = 'FAILED'")
     suspend fun retryFailedChunks(jobId: String)
 
     @Query("SELECT COUNT(*) FROM translation_chunks WHERE jobId = :jobId AND status = 'COMPLETED'")
     suspend fun getCompletedChunkCount(jobId: String): Int
+
+    @Query("SELECT COUNT(*) FROM translation_chunks WHERE jobId = :jobId AND status = 'TRANSLATING'")
+    suspend fun getTranslatingChunkCount(jobId: String): Int
+
+    @Query("SELECT COUNT(*) FROM translation_chunks WHERE status = 'TRANSLATING'")
+    fun observeTotalTranslatingChunks(): Flow<Int>
+
+    @Query("SELECT jobId, COUNT(*) as count FROM translation_chunks WHERE status = 'TRANSLATING' GROUP BY jobId")
+    fun observeTranslatingChunkCountsByJob(): Flow<List<JobChunkCount>>
 
     @Query("SELECT COUNT(*) FROM translation_chunks WHERE jobId = :jobId AND status = 'FAILED'")
     suspend fun getFailedChunkCount(jobId: String): Int

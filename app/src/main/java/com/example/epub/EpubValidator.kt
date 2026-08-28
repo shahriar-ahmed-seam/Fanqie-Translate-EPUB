@@ -118,6 +118,34 @@ object EpubValidator {
                         val opfEntry = z.getEntry(opfPath)
                         if (opfEntry == null) {
                             errors.add("Referenced OPF file missing in exported EPUB: $opfPath")
+                        } else {
+                            // Validate OPF content, manifest items, and cover presence
+                            val opfXml = z.getInputStream(opfEntry).bufferedReader().use { it.readText() }
+                            val opfDoc = Jsoup.parse(opfXml, "", Parser.xmlParser())
+                            val opfDir = if (opfPath.contains('/')) opfPath.substringBeforeLast('/') else ""
+
+                            // Check Cover Manifest Item and File Existence if defined
+                            val coverItem = opfDoc.select("manifest > item[properties*=cover-image]").first()
+                                ?: opfDoc.select("metadata > meta[name=cover]").first()?.let { meta ->
+                                    val coverId = meta.attr("content")
+                                    opfDoc.select("manifest > item#$coverId, manifest > item[id=$coverId]").first()
+                                }
+
+                            if (coverItem != null) {
+                                val coverHref = coverItem.attr("href")
+                                val mediaType = coverItem.attr("media-type")
+                                val cleanHref = coverHref.replace('\\', '/')
+                                val coverFullPath = if (opfDir.isBlank()) cleanHref else "$opfDir/$cleanHref"
+
+                                if (mediaType.isBlank() || !mediaType.startsWith("image/")) {
+                                    errors.add("Cover manifest media-type is invalid: '$mediaType'")
+                                }
+
+                                val coverZipEntry = z.getEntry(coverFullPath)
+                                if (coverZipEntry == null) {
+                                    errors.add("Cover image file referenced by OPF missing from archive: $coverFullPath")
+                                }
+                            }
                         }
                     }
                 }

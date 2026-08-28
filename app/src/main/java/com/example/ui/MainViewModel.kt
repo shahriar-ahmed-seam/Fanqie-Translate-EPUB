@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.TranslatorApplication
 import com.example.data.db.AppDatabase
 import com.example.data.db.BookEntity
 import com.example.data.db.TranslationJobEntity
@@ -37,9 +38,10 @@ data class BookPreviewState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    val database = AppDatabase.getInstance(application)
-    val settingsRepository = SettingsRepository(application)
-    val queueManager = TranslationQueueManager(application, database, settingsRepository)
+    private val app = application as TranslatorApplication
+    val database = app.database
+    val settingsRepository = app.settingsRepository
+    val queueManager = app.queueManager
     val updateManager = AppUpdateManager(application)
 
     val settings: StateFlow<AppSettings> = settingsRepository.settings
@@ -51,6 +53,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val jobMap = jobs.associateBy { it.bookId }
         books.map { BookWithJob(it, jobMap[it.id]) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val activeWorkersByJob: StateFlow<Map<String, Int>> = database.chunkDao()
+        .observeTranslatingChunkCountsByJob()
+        .map { list -> list.associate { it.jobId to it.count } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
     val activeWorkers: StateFlow<Int> = queueManager.activeWorkers
     val isProcessing: StateFlow<Boolean> = queueManager.isProcessing
@@ -109,6 +116,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 queueManager.enqueueEpub(state.uri, state.fileName)
                 closePreview()
+                com.example.service.TranslationService.start(getApplication())
                 _message.value = "Added '${state.parsedEpub.metadata.title}' to translation queue"
             } catch (e: Exception) {
                 _message.value = "Failed to queue book: ${e.message}"
@@ -130,6 +138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             if (count > 0) {
+                com.example.service.TranslationService.start(getApplication())
                 _message.value = "Successfully queued $count EPUB novel${if (count > 1) "s" else ""}"
             }
         }

@@ -2,32 +2,35 @@ package com.example.translation
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.*
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 
 class TomatoMTLProvider(
-    private val timeoutSeconds: Long = 30L
+    private val timeoutSeconds: Long = 30L,
+    maxConcurrentRequests: Int = 64
 ) : TranslationProvider {
 
     override val name: String = "TomatoMTL (Google Engine)"
 
+    // Ensure OkHttp Dispatcher allows full concurrent requests without throttling to 5
+    private val dispatcher = Dispatcher().apply {
+        maxRequests = maxOf(128, maxConcurrentRequests * 2)
+        maxRequestsPerHost = maxOf(128, maxConcurrentRequests * 2)
+    }
+
+    private val connectionPool = ConnectionPool(64, 5, TimeUnit.MINUTES)
+
     private val client: OkHttpClient = OkHttpClient.Builder()
+        .dispatcher(dispatcher)
+        .connectionPool(connectionPool)
         .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
         .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
         .writeTimeout(timeoutSeconds, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
-
-    private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     override suspend fun translate(
         text: String,
@@ -38,63 +41,148 @@ class TomatoMTLProvider(
             return@withContext Result.success(text)
         }
 
-        // Try TomatoMTL web endpoint first
-        val tomatoResult = runCatching {
-            tryTomatoMtlApi(text, sourceLang, targetLang)
+        val sl = if (sourceLang.startsWith("zh")) "zh-CN" else sourceLang
+        val tl = if (targetLang.isBlank()) "en" else targetLang
+
+        // If chunk is unexpectedly large (> 4200 chars), split by paragraph boundaries safely
+        if (text.length > 4200) {
+            val paragraphs = text.split("\n\n")
+            val translatedParagraphs = mutableListOf<String>()
+            var currentBatch = StringBuilder()
+
+            for (paragraph in paragraphs) {
+                if (currentBatch.length + paragraph.length + 2 > 4000 && currentBatch.isNotEmpty()) {
+                    val batchResult = translateSingleBlock(currentBatch.toString(), sl, tl)
+                    if (batchResult.isFailure) {
+                        return@withContext batchResult
+                    }
+                    translatedParagraphs.add(batchResult.getOrThrow())
+                    currentBatch = StringBuilder()
+                }
+                if (currentBatch.isNotEmpty()) currentBatch.append("\n\n")
+                currentBatch.append(paragraph)
+            }
+
+            if (currentBatch.isNotEmpty()) {
+                val batchResult = translateSingleBlock(currentBatch.toString(), sl, tl)
+                if (batchResult.isFailure) {
+                    return@withContext batchResult
+                }
+                translatedParagraphs.add(batchResult.getOrThrow())
+            }
+
+            return@withContext Result.success(translatedParagraphs.joinToString("\n\n"))
+        } else {
+            return@withContext translateSingleBlock(text, sl, tl)
         }
-
-        if (tomatoResult.isSuccess && !tomatoResult.getOrNull().isNullOrBlank()) {
-            return@withContext Result.success(tomatoResult.getOrNull()!!)
-        }
-
-        // Secondary fallback to Google translation engine (which TomatoMTL uses by default)
-        val googleResult = runCatching {
-            tryGoogleTranslateEngine(text, sourceLang, targetLang)
-        }
-
-        if (googleResult.isSuccess && !googleResult.getOrNull().isNullOrBlank()) {
-            return@withContext Result.success(googleResult.getOrNull()!!)
-        }
-
-        val error = tomatoResult.exceptionOrNull() ?: googleResult.exceptionOrNull()
-        ?: IllegalStateException("Translation returned empty text from all engines.")
-
-        Log.e("TomatoMTLProvider", "Translation failed for chunk: ${error.message}", error)
-        Result.failure(error)
     }
 
-    private fun tryTomatoMtlApi(text: String, sourceLang: String, targetLang: String): String? {
-        val payload = JSONObject().apply {
-            put("text", text)
-            put("engine", "google")
-            put("from", if (sourceLang == "zh") "zh-CN" else sourceLang)
-            put("to", targetLang)
-            put("source_lang", if (sourceLang == "zh") "zh-CN" else sourceLang)
-            put("target_lang", targetLang)
+    private fun translateSingleBlock(text: String, sl: String, tl: String): Result<String> {
+        // Attempt translation via TomatoMTL's Google Translation Engine
+        val primaryResult = runCatching {
+            executeTomatoMtlGoogleEngine(text, sl, tl)
         }
 
-        val requestBody = payload.toString().toRequestBody(jsonMediaType)
+        if (primaryResult.isSuccess && !primaryResult.getOrNull().isNullOrBlank()) {
+            return Result.success(primaryResult.getOrNull()!!)
+        }
+
+        // Secondary fallback to single translation endpoint
+        val secondaryResult = runCatching {
+            executeFallbackEngine(text, sl, tl)
+        }
+
+        if (secondaryResult.isSuccess && !secondaryResult.getOrNull().isNullOrBlank()) {
+            return Result.success(secondaryResult.getOrNull()!!)
+        }
+
+        val error = primaryResult.exceptionOrNull() ?: secondaryResult.exceptionOrNull()
+        ?: IllegalStateException("Translation returned empty text from engine.")
+
+        Log.e("TomatoMTLProvider", "Translation request failed: ${error.message}", error)
+        return Result.failure(error)
+    }
+
+    /**
+     * TomatoMTL's Google Translation Engine using direct POST request with form body.
+     */
+    private fun executeTomatoMtlGoogleEngine(text: String, sl: String, tl: String): String {
+        val url = "https://translate.googleapis.com/translate_a/t?client=dict-chrome-ex&sl=$sl&tl=$tl"
+
+        val formBody = FormBody.Builder()
+            .add("q", text)
+            .build()
+
         val request = Request.Builder()
-            .url("https://tomatomtl.com/api/translate")
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+            .header("Accept", "*/*")
             .header("Referer", "https://tomatomtl.com/translate")
             .header("Origin", "https://tomatomtl.com")
-            .header("Accept", "application/json, text/plain, */*")
-            .post(requestBody)
+            .post(formBody)
             .build()
 
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw IllegalStateException("TomatoMTL HTTP ${response.code}: ${response.message}")
+                throw IllegalStateException("TomatoMTL Engine HTTP ${response.code}: ${response.message}")
             }
-            val responseBody = response.body?.string() ?: return null
-            return parseTomatoMtlResponse(responseBody)
+            val responseBody = response.body?.string()
+                ?: throw IllegalStateException("Empty HTTP response body")
+            return parseResponse(responseBody)
         }
     }
 
-    private fun parseTomatoMtlResponse(responseBody: String): String? {
+    /**
+     * Fallback translation engine using single format if primary endpoint encounters issues.
+     */
+    private fun executeFallbackEngine(text: String, sl: String, tl: String): String {
+        val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=$sl&tl=$tl&dt=t"
+
+        val formBody = FormBody.Builder()
+            .add("q", text)
+            .build()
+
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+            .header("Accept", "*/*")
+            .header("Referer", "https://tomatomtl.com/translate")
+            .post(formBody)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Fallback HTTP ${response.code}: ${response.message}")
+            }
+            val responseBody = response.body?.string()
+                ?: throw IllegalStateException("Empty HTTP response body")
+            return parseResponse(responseBody)
+        }
+    }
+
+    private fun parseResponse(responseBody: String): String {
         val trimmed = responseBody.trim()
-        if (trimmed.startsWith("{")) {
+        if (trimmed.startsWith("[")) {
+            val jsonArray = JSONArray(trimmed)
+            val sb = StringBuilder()
+            for (i in 0 until jsonArray.length()) {
+                val item = jsonArray.opt(i)
+                if (item is String) {
+                    sb.append(item)
+                } else if (item is JSONArray) {
+                    for (j in 0 until item.length()) {
+                        val sub = item.opt(j)
+                        if (sub is JSONArray && sub.length() > 0) {
+                            sb.append(sub.optString(0))
+                        } else if (sub is String) {
+                            sb.append(sub)
+                        }
+                    }
+                }
+            }
+            val res = sb.toString()
+            if (res.isNotBlank()) return res
+        } else if (trimmed.startsWith("{")) {
             val json = JSONObject(trimmed)
             when {
                 json.has("translatedText") -> return json.getString("translatedText")
@@ -107,71 +195,11 @@ class TomatoMTLProvider(
                 }
             }
         }
-        return if (trimmed.isNotBlank() && !trimmed.startsWith("<")) trimmed else null
-    }
 
-    /**
-     * TomatoMTL's underlying Google engine connector with paragraph splitting
-     * to safely handle large chunks without character truncation.
-     */
-    private fun tryGoogleTranslateEngine(text: String, sourceLang: String, targetLang: String): String {
-        val sl = if (sourceLang.startsWith("zh")) "zh-CN" else sourceLang
-        val tl = targetLang
-
-        // Split text by lines to ensure high-fidelity paragraph preservation
-        val paragraphs = text.split("\n")
-        val translatedParagraphs = mutableListOf<String>()
-
-        var currentBatch = StringBuilder()
-        for (paragraph in paragraphs) {
-            if (paragraph.isBlank()) {
-                if (currentBatch.isNotEmpty()) {
-                    translatedParagraphs.add(executeGoogleRequest(currentBatch.toString(), sl, tl))
-                    currentBatch = StringBuilder()
-                }
-                translatedParagraphs.add("")
-            } else {
-                if (currentBatch.length + paragraph.length > 1800) {
-                    translatedParagraphs.add(executeGoogleRequest(currentBatch.toString(), sl, tl))
-                    currentBatch = StringBuilder(paragraph)
-                } else {
-                    if (currentBatch.isNotEmpty()) currentBatch.append("\n")
-                    currentBatch.append(paragraph)
-                }
-            }
+        if (trimmed.isNotBlank() && !trimmed.startsWith("<")) {
+            return trimmed
         }
 
-        if (currentBatch.isNotEmpty()) {
-            translatedParagraphs.add(executeGoogleRequest(currentBatch.toString(), sl, tl))
-        }
-
-        return translatedParagraphs.joinToString("\n")
-    }
-
-    private fun executeGoogleRequest(text: String, sl: String, tl: String): String {
-        val encodedText = URLEncoder.encode(text, StandardCharsets.UTF_8.name())
-        val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=$sl&tl=$tl&dt=t&q=$encodedText"
-
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            .header("Accept", "*/*")
-            .get()
-            .build()
-
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("Google Engine HTTP ${response.code}: ${response.message}")
-            }
-            val bodyString = response.body?.string() ?: throw IllegalStateException("Empty response body")
-            val jsonArray = JSONArray(bodyString)
-            val sentences = jsonArray.getJSONArray(0)
-            val result = StringBuilder()
-            for (i in 0 until sentences.length()) {
-                val sentence = sentences.getJSONArray(i)
-                result.append(sentence.getString(0))
-            }
-            return result.toString()
-        }
+        throw IllegalStateException("Translation returned empty or invalid response")
     }
 }

@@ -64,12 +64,10 @@ object EpubParser {
                 ncxId = spineTocAttr
             }
 
-            // Cover meta tag check e.g. <meta name="cover" content="cover-image"/>
-            val metaCover = opfDoc.select("metadata > meta[name=cover]").attr("content")
-            if (metaCover.isNotBlank()) {
-                coverItemId = metaCover
-            }
-
+            // Cover identification strategy:
+            // 1. EPUB3 properties="cover-image" on manifest item
+            // 2. EPUB2 <meta name="cover" content="item_id"/> in metadata
+            // 3. Fallback: manifest item with image media type and 'cover' in id or href
             for (item in opfDoc.select("manifest > item")) {
                 val id = item.attr("id")
                 val href = item.attr("href")
@@ -89,6 +87,14 @@ object EpubParser {
                 }
             }
 
+            // Cover meta tag check e.g. <meta name="cover" content="cover-image"/>
+            if (coverItemId == null) {
+                val metaCover = opfDoc.select("metadata > meta[name=cover]").attr("content")
+                if (metaCover.isNotBlank() && manifest.containsKey(metaCover)) {
+                    coverItemId = metaCover
+                }
+            }
+
             // Fallback cover search
             if (coverItemId == null) {
                 coverItemId = manifest.values.firstOrNull {
@@ -100,13 +106,14 @@ object EpubParser {
             var coverBytes: ByteArray? = null
             var coverMediaType: String? = null
             var coverHref: String? = null
+            var coverFullPath: String? = null
 
             if (coverItemId != null && manifest.containsKey(coverItemId)) {
                 val coverItem = manifest[coverItemId]!!
                 coverMediaType = coverItem.mediaType
                 coverHref = coverItem.href
-                val fullCoverPath = resolveZipPath(opfDir, coverItem.href)
-                val coverEntry = zip.getEntry(fullCoverPath)
+                coverFullPath = resolveZipPath(opfDir, coverItem.href)
+                val coverEntry = zip.getEntry(coverFullPath)
                 if (coverEntry != null) {
                     coverBytes = zip.getInputStream(coverEntry).use { it.readBytes() }
                 }
@@ -165,7 +172,9 @@ object EpubParser {
                     author = author,
                     description = description,
                     language = language,
-                    coverHref = coverHref
+                    coverItemId = coverItemId,
+                    coverHref = coverHref,
+                    coverFullPath = coverFullPath
                 ),
                 manifest = manifest,
                 spine = spine,

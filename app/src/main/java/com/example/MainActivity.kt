@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.*
 import com.example.ui.theme.MyApplicationTheme
+import java.io.File
 
 enum class Screen(val title: String) {
     HOME("Home"),
@@ -33,9 +34,18 @@ enum class Screen(val title: String) {
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+
         setContent {
             MyApplicationTheme {
                 MainApp(viewModel = viewModel)
@@ -52,6 +62,7 @@ fun MainApp(viewModel: MainViewModel) {
 
     val booksWithJobs by viewModel.allBooksWithJobs.collectAsStateWithLifecycle()
     val activeWorkers by viewModel.activeWorkers.collectAsStateWithLifecycle()
+    val activeWorkersByJob by viewModel.activeWorkersByJob.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val previewState by viewModel.previewState.collectAsStateWithLifecycle()
@@ -81,8 +92,14 @@ fun MainApp(viewModel: MainViewModel) {
 
     val onExport: (String, String) -> Unit = { sourcePath, bookTitle ->
         pendingExportSourcePath = sourcePath
-        val safeName = bookTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_") + "-English.epub"
-        exportLauncher.launch(safeName)
+        val file = File(sourcePath)
+        val exportFileName = if (file.name.endsWith(".epub", ignoreCase = true)) {
+            file.name
+        } else {
+            val safeName = bookTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+            "$safeName.epub"
+        }
+        exportLauncher.launch(exportFileName)
     }
 
     Scaffold(
@@ -134,6 +151,7 @@ fun MainApp(viewModel: MainViewModel) {
                 Screen.HOME -> HomeScreen(
                     booksWithJobs = booksWithJobs,
                     activeWorkers = activeWorkers,
+                    activeWorkersByJob = activeWorkersByJob,
                     isProcessing = isProcessing,
                     onSelectSingleEpub = { viewModel.previewSingleEpub(it) },
                     onSelectMultipleEpubs = { viewModel.importMultipleEpubs(it) },
@@ -147,6 +165,7 @@ fun MainApp(viewModel: MainViewModel) {
                 Screen.QUEUE -> QueueScreen(
                     booksWithJobs = booksWithJobs,
                     activeWorkers = activeWorkers,
+                    activeWorkersByJob = activeWorkersByJob,
                     settings = settings,
                     onPauseJob = { viewModel.pauseJob(it) },
                     onResumeJob = { viewModel.resumeJob(it) },

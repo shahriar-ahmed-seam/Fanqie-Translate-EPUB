@@ -30,6 +30,7 @@ import java.io.File
 fun HomeScreen(
     booksWithJobs: List<BookWithJob>,
     activeWorkers: Int,
+    activeWorkersByJob: Map<String, Int> = emptyMap(),
     isProcessing: Boolean,
     onSelectSingleEpub: (Uri) -> Unit,
     onSelectMultipleEpubs: (List<Uri>) -> Unit,
@@ -217,8 +218,10 @@ fun HomeScreen(
                 }
             } else {
                 items(booksWithJobs, key = { it.book.id }) { item ->
+                    val jobWorkers = item.job?.let { activeWorkersByJob[it.id] } ?: 0
                     BookJobCard(
                         item = item,
+                        jobActiveWorkers = jobWorkers,
                         onExport = onExportEpub,
                         onPause = onPauseJob,
                         onResume = onResumeJob,
@@ -239,6 +242,7 @@ fun HomeScreen(
 @Composable
 fun BookJobCard(
     item: BookWithJob,
+    jobActiveWorkers: Int = 0,
     onExport: (exportedFilePath: String, bookTitle: String) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
@@ -327,18 +331,30 @@ fun BookJobCard(
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "${job.completedChunks}/${job.totalChunks} chunks translated",
+                        text = "${job.completedChunks} / ${job.totalChunks}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Text(
-                        text = "${(job.progress * 100).toInt()}%",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (jobActiveWorkers > 0) {
+                            Text(
+                                text = "$jobActiveWorkers active",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text(
+                            text = "${(job.progress * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 
@@ -379,7 +395,18 @@ fun BookJobCard(
                             Text("Export English EPUB")
                         }
                     }
-                    "TRANSLATING" -> {
+                    "RUNNING", "TRANSLATING" -> {
+                        OutlinedButton(onClick = { onPause(job.id) }) {
+                            Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Pause")
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Button(onClick = onNavigateToQueue) {
+                            Text("Queue")
+                        }
+                    }
+                    "QUEUED" -> {
                         OutlinedButton(onClick = { onPause(job.id) }) {
                             Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -422,9 +449,11 @@ fun BookJobCard(
 fun StatusBadge(status: String) {
     val (bgColor, textColor, borderColor) = when (status) {
         "COMPLETED" -> Triple(Color(0xFF1E3A24), Color(0xFFA5D6A7), Color(0xFF2E7D32))
-        "TRANSLATING" -> Triple(Color(0x33D0BCFF), Color(0xFFD0BCFF), Color(0x66D0BCFF))
+        "RUNNING", "TRANSLATING" -> Triple(Color(0x33D0BCFF), Color(0xFFD0BCFF), Color(0x66D0BCFF))
+        "QUEUED" -> Triple(Color(0xFF1A2E3E), Color(0xFF90CAF9), Color(0xFF1565C0))
         "PAUSED" -> Triple(Color(0xFF3E2D1A), Color(0xFFFFCC80), Color(0xFFE65100))
         "FAILED" -> Triple(Color(0xFF3E1F24), Color(0xFFEF9A9A), Color(0xFFC62828))
+        "CANCELLED" -> Triple(Color(0xFF2B2930), Color(0xFF9E9E9E), Color(0xFF616161))
         else -> Triple(Color(0xFF2B2930), Color(0xFFCAC4D0), Color(0xFF49454F))
     }
 
