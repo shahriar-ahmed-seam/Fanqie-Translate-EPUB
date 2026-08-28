@@ -1,0 +1,299 @@
+package com.example.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.example.data.repository.AppSettings
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun QueueScreen(
+    booksWithJobs: List<BookWithJob>,
+    activeWorkers: Int,
+    settings: AppSettings,
+    onPauseJob: (String) -> Unit,
+    onResumeJob: (String) -> Unit,
+    onRetryJob: (String) -> Unit,
+    onCancelJob: (String) -> Unit,
+    onExportEpub: (exportedFilePath: String, bookTitle: String) -> Unit
+) {
+    val activeAndQueuedJobs = booksWithJobs.filter {
+        it.job?.status in listOf("TRANSLATING", "QUEUED", "PAUSED", "FAILED")
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = "Translation Queue",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Concurrency Status Banner
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("worker_status_card"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    ),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = "Active Translation Workers",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Workers $activeWorkers / ${settings.workerCount}",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                text = "Max active novels: ${settings.maxActiveBooks}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                            )
+                        }
+
+                        if (activeWorkers > 0) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(36.dp),
+                                strokeWidth = 3.dp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.DoneAll,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (activeAndQueuedJobs.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircleOutline,
+                                contentDescription = null,
+                                modifier = Modifier.size(64.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Queue is empty",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "All translation jobs have finished or none are queued.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(activeAndQueuedJobs, key = { it.book.id }) { item ->
+                    QueueJobCard(
+                        item = item,
+                        onPause = onPauseJob,
+                        onResume = onResumeJob,
+                        onRetry = onRetryJob,
+                        onCancel = onCancelJob,
+                        onExport = onExportEpub
+                    )
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+@Composable
+fun QueueJobCard(
+    item: BookWithJob,
+    onPause: (String) -> Unit,
+    onResume: (String) -> Unit,
+    onRetry: (String) -> Unit,
+    onCancel: (String) -> Unit,
+    onExport: (exportedFilePath: String, bookTitle: String) -> Unit
+) {
+    val book = item.book
+    val job = item.job ?: return
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("queue_job_${job.id}"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = book.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                StatusBadge(status = job.status)
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "${book.author} • ${book.chapterCount} chapters",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            LinearProgressIndicator(
+                progress = { job.progress },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "${job.completedChunks} of ${job.totalChunks} chunks translated",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (job.failedChunks > 0) {
+                    Text(
+                        text = "${job.failedChunks} failed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            if (job.errorMessage != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.errorContainer
+                ) {
+                    Text(
+                        text = job.errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Control Buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = { onCancel(job.id) },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Cancel")
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                when (job.status) {
+                    "TRANSLATING" -> {
+                        Button(onClick = { onPause(job.id) }) {
+                            Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Pause")
+                        }
+                    }
+                    "PAUSED" -> {
+                        Button(onClick = { onResume(job.id) }) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Resume")
+                        }
+                    }
+                    "FAILED" -> {
+                        Button(
+                            onClick = { onRetry(job.id) },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Retry Failed Chunks")
+                        }
+                    }
+                    "COMPLETED" -> {
+                        if (job.exportedUri != null) {
+                            Button(onClick = { onExport(job.exportedUri, book.title) }) {
+                                Text("Export")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

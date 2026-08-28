@@ -1,0 +1,6 @@
+{
+  "name": "EPUB Translator",
+  "description": "Translate Chinese EPUB novels to English using TomatoMTL with multi-book queue and structure preservation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
