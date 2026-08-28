@@ -73,25 +73,25 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      - name: Ensure Release Keystore
+      - name: Ensure Debug Keystore
         run: |
-          if [ ! -f release.keystore ] && [ -f debug.keystore.base64 ]; then
-            python3 -c "import base64; open('release.keystore', 'wb').write(base64.b64decode(open('debug.keystore.base64').read().strip()))"
+          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            python3 -c "import base64; open('debug.keystore', 'wb').write(base64.b64decode(open('debug.keystore.base64').read().strip()))"
           fi
 
-      - name: Build Release APK with Dynamic Version
+      - name: Build Debug APK with Dynamic Version
         run: |
-          ./gradlew assembleRelease -PversionCode=${{ steps.versioning.outputs.versionCode }} -PversionName=${{ steps.versioning.outputs.version }} --no-daemon
+          ./gradlew assembleDebug -PversionCode=${{ steps.versioning.outputs.versionCode }} -PversionName=${{ steps.versioning.outputs.version }} --no-daemon
 
-      - name: Locate and Rename Release APK
+      - name: Locate and Rename Debug APK
         id: apk
         run: |
-          SRC_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          SRC_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
           if [ -z "$SRC_APK" ] || [ ! -f "$SRC_APK" ]; then
-            echo "Error: Release output APK not found!"
+            echo "Error: Debug output APK not found!"
             exit 1
           fi
-          DEST_APK="app/build/outputs/apk/release/EPUB-Translator-${{ steps.versioning.outputs.tag }}.apk"
+          DEST_APK="app/build/outputs/apk/debug/EPUB-Translator-${{ steps.versioning.outputs.tag }}.apk"
           mv "$SRC_APK" "$DEST_APK"
           echo "apk_path=$DEST_APK" >> $GITHUB_OUTPUT
           echo "Renamed APK to $DEST_APK"

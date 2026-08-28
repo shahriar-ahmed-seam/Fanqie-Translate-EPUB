@@ -25,22 +25,7 @@ android {
   }
 
   signingConfigs {
-    create("release") {
-      val defaultKeystore = file("${rootDir}/release.keystore")
-      if (!defaultKeystore.exists()) {
-        val base64File = file("${rootDir}/debug.keystore.base64")
-        if (base64File.exists()) {
-          val decoded = Base64.getDecoder().decode(base64File.readText().trim())
-          defaultKeystore.writeBytes(decoded)
-        }
-      }
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: defaultKeystore.absolutePath
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD") ?: "android"
-      keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
-      keyPassword = System.getenv("KEY_PASSWORD") ?: "android"
-    }
-    create("debugConfig") {
+    getByName("debug") {
       val defaultKeystore = file("${rootDir}/debug.keystore")
       if (!defaultKeystore.exists()) {
         val base64File = file("${rootDir}/debug.keystore.base64")
@@ -49,21 +34,24 @@ android {
           defaultKeystore.writeBytes(decoded)
         }
       }
-      storeFile = defaultKeystore
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      if (defaultKeystore.exists()) {
+        storeFile = defaultKeystore
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
   }
 
   buildTypes {
+    debug {
+      signingConfig = signingConfigs.getByName("debug")
+    }
     release {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
