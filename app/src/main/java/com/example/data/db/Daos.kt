@@ -77,6 +77,21 @@ interface TranslationChunkDao {
     @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId ORDER BY chapterOrder ASC, chunkOrder ASC")
     suspend fun getChunksByJob(jobId: String): List<TranslationChunkEntity>
 
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND chapterId = :chapterId ORDER BY chunkOrder ASC")
+    suspend fun getChunksByJobAndChapter(jobId: String, chapterId: String): List<TranslationChunkEntity>
+
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND chunkType = 'CHAPTER_TITLE'")
+    suspend fun getChapterTitleChunks(jobId: String): List<TranslationChunkEntity>
+
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND chunkType = 'TITLE' LIMIT 1")
+    suspend fun getTitleChunk(jobId: String): TranslationChunkEntity?
+
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND chunkType = 'DESCRIPTION' LIMIT 1")
+    suspend fun getDescriptionChunk(jobId: String): TranslationChunkEntity?
+
+    @Query("SELECT COUNT(*) FROM translation_chunks WHERE jobId = :jobId AND (status != 'COMPLETED' OR translatedText IS NULL OR translatedText = '')")
+    suspend fun getIncompleteChunkCount(jobId: String): Int
+
     @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId ORDER BY chapterOrder ASC, chunkOrder ASC")
     fun observeChunksByJob(jobId: String): Flow<List<TranslationChunkEntity>>
 

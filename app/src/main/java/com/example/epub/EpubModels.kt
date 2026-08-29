@@ -9,7 +9,10 @@ data class EpubMetadata(
     val language: String = "zh",
     val coverItemId: String? = null,
     val coverHref: String? = null,
-    val coverFullPath: String? = null
+    val coverFullPath: String? = null,
+    val coverMediaType: String? = null,
+    val coverProperties: String? = null,
+    val legacyMetaCover: String? = null
 )
 
 data class ManifestItem(

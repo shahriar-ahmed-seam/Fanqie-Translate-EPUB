@@ -59,6 +59,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .map { list -> list.associate { it.jobId to it.count } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
+    private val _exportingBookIds = MutableStateFlow<Set<String>>(emptySet())
+    val exportingBookIds: StateFlow<Set<String>> = _exportingBookIds.asStateFlow()
+
     val activeWorkers: StateFlow<Int> = queueManager.activeWorkers
     val isProcessing: StateFlow<Boolean> = queueManager.isProcessing
 
@@ -160,22 +163,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun exportEpubToUri(context: Context, exportedFilePath: String, destinationUri: Uri) {
+    fun exportEpubToUri(context: Context, bookId: String, exportedFilePath: String?, destinationUri: Uri) {
+        if (_exportingBookIds.value.contains(bookId)) {
+            _message.value = "Export already in progress for this book"
+            return
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
+            _exportingBookIds.update { it + bookId }
             try {
-                val sourceFile = File(exportedFilePath)
-                if (!sourceFile.exists()) {
-                    _message.value = "Exported file does not exist"
-                    return@launch
+                val book = database.bookDao().getBookById(bookId)
+                val job = database.jobDao().getJobByBookId(bookId)
+                val bookDir = File(getApplication<Application>().filesDir, "books/$bookId")
+                val sourceEpubFile = File(bookDir, "source.epub")
+
+                var exportFile = if (!exportedFilePath.isNullOrBlank()) File(exportedFilePath) else null
+
+                // If export file doesn't exist or is empty or needs rebuilding, build it using streaming rebuilder
+                if (exportFile == null || !exportFile.exists() || exportFile.length() == 0L) {
+                    if (job == null || book == null) {
+                        _message.value = "Cannot export: book record not found"
+                        return@launch
+                    }
+
+                    val titleChunk = database.chunkDao().getTitleChunk(job.id)
+                    val translatedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: book.title
+                    val exportName = "${com.example.epub.EpubRebuilder.sanitizeFileName(translatedTitle)}.epub"
+                    exportFile = File(bookDir, exportName)
+
+                    com.example.epub.EpubRebuilder.rebuild(
+                        sourceEpubFile = sourceEpubFile,
+                        bookId = book.id,
+                        jobId = job.id,
+                        database = database,
+                        outputFile = exportFile
+                    )
+
+                    database.jobDao().updateJob(
+                        job.copy(
+                            status = "COMPLETED",
+                            exportedUri = exportFile.absolutePath,
+                            exportedFileName = exportName,
+                            errorMessage = null,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
                 }
-                context.contentResolver.openOutputStream(destinationUri)?.use { output ->
-                    sourceFile.inputStream().use { input ->
-                        input.copyTo(output)
+
+                // Stream export file to Destination URI via SAF
+                val outputStream = context.contentResolver.openOutputStream(destinationUri)
+                    ?: throw IllegalStateException("Could not open destination document for writing")
+
+                outputStream.use { output ->
+                    exportFile.inputStream().use { input ->
+                        input.copyTo(output, bufferSize = 32 * 1024)
                     }
                 }
+
                 _message.value = "EPUB exported successfully!"
             } catch (e: Exception) {
-                _message.value = "Export failed: ${e.message}"
+                android.util.Log.e("MainViewModel", "Export failed for book $bookId", e)
+                _message.value = "EPUB export failed: ${e.message ?: "Unknown error"}"
+            } finally {
+                _exportingBookIds.update { it - bookId }
             }
         }
     }

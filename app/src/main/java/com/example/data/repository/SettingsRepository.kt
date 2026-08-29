@@ -14,7 +14,8 @@ data class AppSettings(
     val timeoutSeconds: Int = 30,
     val githubOwner: String = "shahriarseam",
     val githubRepo: String = "epub-translator",
-    val autoCheckUpdates: Boolean = true
+    val autoCheckUpdates: Boolean = true,
+    val isDarkMode: Boolean = false
 )
 
 class SettingsRepository(context: Context) {
@@ -33,7 +34,8 @@ class SettingsRepository(context: Context) {
             timeoutSeconds = prefs.getInt("timeout_seconds", 30).coerceIn(5, 120),
             githubOwner = prefs.getString("github_owner", "shahriarseam") ?: "shahriarseam",
             githubRepo = prefs.getString("github_repo", "epub-translator") ?: "epub-translator",
-            autoCheckUpdates = prefs.getBoolean("auto_check_updates", true)
+            autoCheckUpdates = prefs.getBoolean("auto_check_updates", true),
+            isDarkMode = prefs.getBoolean("dark_mode", false)
         )
     }
 
@@ -47,6 +49,7 @@ class SettingsRepository(context: Context) {
             putString("github_owner", newSettings.githubOwner)
             putString("github_repo", newSettings.githubRepo)
             putBoolean("auto_check_updates", newSettings.autoCheckUpdates)
+            putBoolean("dark_mode", newSettings.isDarkMode)
             apply()
         }
         _settings.value = newSettings

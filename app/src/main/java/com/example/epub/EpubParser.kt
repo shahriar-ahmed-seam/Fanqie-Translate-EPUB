@@ -54,66 +54,40 @@ object EpubParser {
 
             // Parse Manifest
             val manifest = mutableMapOf<String, ManifestItem>()
-            var coverItemId: String? = null
             var ncxId: String? = null
             var navId: String? = null
 
-            val spineElem = opfDoc.select("spine").first()
+            val spineElem = opfDoc.select("spine, opf\\:spine").first()
             val spineTocAttr = spineElem?.attr("toc")
             if (!spineTocAttr.isNullOrBlank()) {
                 ncxId = spineTocAttr
             }
 
-            // Cover identification strategy:
-            // 1. EPUB3 properties="cover-image" on manifest item
-            // 2. EPUB2 <meta name="cover" content="item_id"/> in metadata
-            // 3. Fallback: manifest item with image media type and 'cover' in id or href
-            for (item in opfDoc.select("manifest > item")) {
+            for (item in opfDoc.select("manifest > item, opf\\:manifest > opf\\:item, item")) {
                 val id = item.attr("id")
                 val href = item.attr("href")
                 val mediaType = item.attr("media-type")
                 val properties = item.attr("properties")
 
-                manifest[id] = ManifestItem(id, href, mediaType, properties)
+                if (id.isNotBlank() && href.isNotBlank()) {
+                    manifest[id] = ManifestItem(id, href, mediaType, properties)
 
-                if (properties.contains("cover-image", ignoreCase = true)) {
-                    coverItemId = id
-                }
-                if (properties.contains("nav", ignoreCase = true)) {
-                    navId = id
-                }
-                if (mediaType == "application/x-dtbncx+xml") {
-                    ncxId = id
+                    if (properties.contains("nav", ignoreCase = true)) {
+                        navId = id
+                    }
+                    if (mediaType == "application/x-dtbncx+xml") {
+                        ncxId = id
+                    }
                 }
             }
 
-            // Cover meta tag check e.g. <meta name="cover" content="cover-image"/>
-            if (coverItemId == null) {
-                val metaCover = opfDoc.select("metadata > meta[name=cover]").attr("content")
-                if (metaCover.isNotBlank() && manifest.containsKey(metaCover)) {
-                    coverItemId = metaCover
-                }
-            }
-
-            // Fallback cover search
-            if (coverItemId == null) {
-                coverItemId = manifest.values.firstOrNull {
-                    it.mediaType.startsWith("image/") && (it.id.contains("cover", ignoreCase = true) || it.href.contains("cover", ignoreCase = true))
-                }?.id
-            }
+            // Identify cover using standard-compliant multi-strategy lookup
+            val coverInfo = findCoverInfo(opfDoc, manifest, opfDir, zip)
 
             // Extract Cover Image Bytes
             var coverBytes: ByteArray? = null
-            var coverMediaType: String? = null
-            var coverHref: String? = null
-            var coverFullPath: String? = null
-
-            if (coverItemId != null && manifest.containsKey(coverItemId)) {
-                val coverItem = manifest[coverItemId]!!
-                coverMediaType = coverItem.mediaType
-                coverHref = coverItem.href
-                coverFullPath = resolveZipPath(opfDir, coverItem.href)
-                val coverEntry = zip.getEntry(coverFullPath)
+            if (coverInfo != null) {
+                val coverEntry = findZipEntry(zip, coverInfo.fullPath)
                 if (coverEntry != null) {
                     coverBytes = zip.getInputStream(coverEntry).use { it.readBytes() }
                 }
@@ -121,7 +95,7 @@ object EpubParser {
 
             // Parse Spine - STRICT READING ORDER
             val spine = mutableListOf<SpineItem>()
-            for (itemref in opfDoc.select("spine > itemref")) {
+            for (itemref in opfDoc.select("spine > itemref, opf\\:spine > opf\\:itemref, itemref")) {
                 val idref = itemref.attr("idref")
                 val linear = itemref.attr("linear") != "no"
                 val item = manifest[idref]
@@ -137,9 +111,9 @@ object EpubParser {
             val chapters = mutableListOf<ParsedChapter>()
             spine.forEachIndexed { index, spineItem ->
                 val fullChapterPath = resolveZipPath(opfDir, spineItem.href)
-                val chapterEntry = zip.getEntry(fullChapterPath)
+                val chapterEntry = findZipEntry(zip, fullChapterPath)
                 if (chapterEntry != null) {
-                    val rawXhtml = zip.getInputStream(chapterEntry).bufferedReader().use { it.readText() }
+                    val rawXhtml = zip.getInputStream(chapterEntry).bufferedReader(Charsets.UTF_8).use { it.readText() }
                     val chapterDoc = Jsoup.parse(rawXhtml, "", Parser.htmlParser())
 
                     // Extract chapter title
@@ -172,16 +146,19 @@ object EpubParser {
                     author = author,
                     description = description,
                     language = language,
-                    coverItemId = coverItemId,
-                    coverHref = coverHref,
-                    coverFullPath = coverFullPath
+                    coverItemId = coverInfo?.itemId,
+                    coverHref = coverInfo?.href,
+                    coverFullPath = coverInfo?.fullPath,
+                    coverMediaType = coverInfo?.mediaType,
+                    coverProperties = coverInfo?.properties,
+                    legacyMetaCover = coverInfo?.legacyMetaCover
                 ),
                 manifest = manifest,
                 spine = spine,
                 ncxHref = ncxHref,
                 navHref = navHref,
                 coverBytes = coverBytes,
-                coverMediaType = coverMediaType,
+                coverMediaType = coverInfo?.mediaType,
                 chapters = chapters
             )
         } finally {
@@ -189,9 +166,215 @@ object EpubParser {
         }
     }
 
-    private fun resolveZipPath(baseDir: String, href: String): String {
-        val cleanHref = href.replace('\\', '/')
-        if (baseDir.isBlank()) return cleanHref
+    data class CoverInfo(
+        val itemId: String,
+        val href: String,
+        val mediaType: String,
+        val fullPath: String,
+        val properties: String? = null,
+        val legacyMetaCover: String? = null
+    )
+
+    /**
+     * Identifies the cover image from OPF document, manifest, and optional ZIP archive.
+     * Supports EPUB3 (properties="cover-image"), EPUB2 (<meta name="cover">), <guide>,
+     * cover XHTML page inspection, and naming heuristics.
+     */
+    fun findCoverInfo(
+        opfDoc: Document,
+        manifest: Map<String, ManifestItem>,
+        opfDir: String,
+        zip: ZipFile? = null
+    ): CoverInfo? {
+        // Strategy 1: EPUB3 manifest item with properties containing "cover-image" and image media-type
+        val ep3Item = manifest.values.firstOrNull {
+            it.properties?.contains("cover-image", ignoreCase = true) == true &&
+                    it.mediaType.startsWith("image/", ignoreCase = true)
+        }
+        if (ep3Item != null) {
+            return CoverInfo(
+                itemId = ep3Item.id,
+                href = ep3Item.href,
+                mediaType = ep3Item.mediaType,
+                fullPath = resolveZipPath(opfDir, ep3Item.href),
+                properties = ep3Item.properties
+            )
+        }
+
+        // Strategy 2: EPUB2 <meta name="cover" content="item_id"/> (or <meta property="cover"...>)
+        val metaCover = opfDoc.select("metadata > meta[name=cover], opf\\:metadata > opf\\:meta[name=cover], meta[name=cover]").first()?.attr("content")
+            ?.takeIf { it.isNotBlank() }
+            ?: opfDoc.select("metadata > meta[property=cover], metadata > meta[property=cover-image]").first()?.text()?.takeIf { it.isNotBlank() }
+
+        if (metaCover != null && manifest.containsKey(metaCover)) {
+            val item = manifest[metaCover]!!
+            if (item.mediaType.startsWith("image/", ignoreCase = true)) {
+                return CoverInfo(
+                    itemId = item.id,
+                    href = item.href,
+                    mediaType = item.mediaType,
+                    fullPath = resolveZipPath(opfDir, item.href),
+                    properties = item.properties,
+                    legacyMetaCover = metaCover
+                )
+            } else if ((item.mediaType.contains("xhtml", ignoreCase = true) || item.mediaType.contains("html", ignoreCase = true)) && zip != null) {
+                // Meta cover pointed to an XHTML cover page. Inspect the XHTML for the image inside.
+                val coverXhtmlPath = resolveZipPath(opfDir, item.href)
+                val entry = findZipEntry(zip, coverXhtmlPath)
+                if (entry != null) {
+                    try {
+                        val xhtml = zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                        val coverDoc = Jsoup.parse(xhtml, "", Parser.htmlParser())
+                        val imgElem = coverDoc.select("img, image, svg image").firstOrNull()
+                        val imgSrc = imgElem?.attr("src")?.takeIf { it.isNotBlank() }
+                            ?: imgElem?.attr("xlink:href")?.takeIf { it.isNotBlank() }
+                            ?: imgElem?.attr("href")?.takeIf { it.isNotBlank() }
+                        if (imgSrc != null) {
+                            val xhtmlDir = if (coverXhtmlPath.contains('/')) coverXhtmlPath.substringBeforeLast('/') else ""
+                            val resolvedImgPath = resolveZipPath(xhtmlDir, imgSrc)
+                            val manifestImageItem = manifest.values.firstOrNull {
+                                resolveZipPath(opfDir, it.href).equals(resolvedImgPath, ignoreCase = true)
+                            }
+                            if (manifestImageItem != null) {
+                                return CoverInfo(
+                                    itemId = manifestImageItem.id,
+                                    href = manifestImageItem.href,
+                                    mediaType = manifestImageItem.mediaType,
+                                    fullPath = resolvedImgPath,
+                                    properties = manifestImageItem.properties,
+                                    legacyMetaCover = metaCover
+                                )
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
+        // Strategy 3: <guide><reference type="cover" href="..."/>
+        val guideCoverRef = opfDoc.select("guide > reference[type=cover], opf\\:guide > opf\\:reference[type=cover], reference[type=cover]").first()
+        if (guideCoverRef != null) {
+            val href = guideCoverRef.attr("href")
+            if (href.isNotBlank()) {
+                val cleanRefHref = href.substringBefore('#')
+                val fullGuidePath = resolveZipPath(opfDir, cleanRefHref)
+                val manifestItem = manifest.values.firstOrNull {
+                    resolveZipPath(opfDir, it.href).equals(fullGuidePath, ignoreCase = true)
+                }
+                if (manifestItem != null) {
+                    if (manifestItem.mediaType.startsWith("image/", ignoreCase = true)) {
+                        return CoverInfo(
+                            itemId = manifestItem.id,
+                            href = manifestItem.href,
+                            mediaType = manifestItem.mediaType,
+                            fullPath = fullGuidePath,
+                            properties = manifestItem.properties
+                        )
+                    } else if ((manifestItem.mediaType.contains("xhtml", ignoreCase = true) || manifestItem.mediaType.contains("html", ignoreCase = true)) && zip != null) {
+                        val entry = findZipEntry(zip, fullGuidePath)
+                        if (entry != null) {
+                            try {
+                                val xhtml = zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                                val coverDoc = Jsoup.parse(xhtml, "", Parser.htmlParser())
+                                val imgElem = coverDoc.select("img, image, svg image").firstOrNull()
+                                val imgSrc = imgElem?.attr("src")?.takeIf { it.isNotBlank() }
+                                    ?: imgElem?.attr("xlink:href")?.takeIf { it.isNotBlank() }
+                                    ?: imgElem?.attr("href")?.takeIf { it.isNotBlank() }
+                                if (imgSrc != null) {
+                                    val xhtmlDir = if (fullGuidePath.contains('/')) fullGuidePath.substringBeforeLast('/') else ""
+                                    val resolvedImgPath = resolveZipPath(xhtmlDir, imgSrc)
+                                    val manifestImageItem = manifest.values.firstOrNull {
+                                        resolveZipPath(opfDir, it.href).equals(resolvedImgPath, ignoreCase = true)
+                                    }
+                                    if (manifestImageItem != null) {
+                                        return CoverInfo(
+                                            itemId = manifestImageItem.id,
+                                            href = manifestImageItem.href,
+                                            mediaType = manifestImageItem.mediaType,
+                                            fullPath = resolvedImgPath,
+                                            properties = manifestImageItem.properties
+                                        )
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Strategy 4: Manifest item with image media type and 'cover' in id or href
+        val imageItems = manifest.values.filter { it.mediaType.startsWith("image/", ignoreCase = true) }
+        val coverNamedItem = imageItems.firstOrNull {
+            it.id.contains("cover", ignoreCase = true) || it.href.contains("cover", ignoreCase = true)
+        }
+        if (coverNamedItem != null) {
+            return CoverInfo(
+                itemId = coverNamedItem.id,
+                href = coverNamedItem.href,
+                mediaType = coverNamedItem.mediaType,
+                fullPath = resolveZipPath(opfDir, coverNamedItem.href),
+                properties = coverNamedItem.properties
+            )
+        }
+
+        // Strategy 5: First image item in manifest
+        val firstImage = imageItems.firstOrNull()
+        if (firstImage != null) {
+            return CoverInfo(
+                itemId = firstImage.id,
+                href = firstImage.href,
+                mediaType = firstImage.mediaType,
+                fullPath = resolveZipPath(opfDir, firstImage.href),
+                properties = firstImage.properties
+            )
+        }
+
+        return null
+    }
+
+    fun findZipEntry(zip: ZipFile, path: String): ZipEntry? {
+        val direct = zip.getEntry(path)
+        if (direct != null) return direct
+
+        val clean = path.replace('\\', '/').trimStart('/')
+        val directClean = zip.getEntry(clean)
+        if (directClean != null) return directClean
+
+        // Try decoded path
+        try {
+            val decoded = java.net.URLDecoder.decode(clean, "UTF-8")
+            val decodedEntry = zip.getEntry(decoded)
+            if (decodedEntry != null) return decodedEntry
+        } catch (_: Exception) {}
+
+        // Case-insensitive lookup fallback
+        val entries = zip.entries()
+        while (entries.hasMoreElements()) {
+            val entry = entries.nextElement()
+            val entryName = entry.name.replace('\\', '/').trimStart('/')
+            if (entryName.equals(clean, ignoreCase = true)) {
+                return entry
+            }
+        }
+        return null
+    }
+
+    fun resolveZipPath(baseDir: String, href: String): String {
+        val cleanHref = href.substringBefore('#').substringBefore('?').replace('\\', '/')
+        if (baseDir.isBlank()) {
+            val parts = cleanHref.split('/')
+            val stack = mutableListOf<String>()
+            for (part in parts) {
+                if (part == "." || part.isEmpty()) continue
+                if (part == "..") {
+                    if (stack.isNotEmpty()) stack.removeAt(stack.size - 1)
+                } else {
+                    stack.add(part)
+                }
+            }
+            return stack.joinToString("/")
+        }
         val combined = "$baseDir/$cleanHref"
         val parts = combined.split('/')
         val stack = mutableListOf<String>()

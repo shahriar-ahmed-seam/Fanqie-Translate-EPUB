@@ -23,15 +23,16 @@ fun QueueScreen(
     booksWithJobs: List<BookWithJob>,
     activeWorkers: Int,
     activeWorkersByJob: Map<String, Int> = emptyMap(),
+    exportingBookIds: Set<String> = emptySet(),
     settings: AppSettings,
     onPauseJob: (String) -> Unit,
     onResumeJob: (String) -> Unit,
     onRetryJob: (String) -> Unit,
     onCancelJob: (String) -> Unit,
-    onExportEpub: (exportedFilePath: String, bookTitle: String) -> Unit
+    onExportEpub: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit
 ) {
     val activeAndQueuedJobs = booksWithJobs.filter {
-        it.job?.status in listOf("RUNNING", "TRANSLATING", "QUEUED", "PAUSED", "FAILED")
+        it.job?.status in listOf("RUNNING", "TRANSLATING", "QUEUED", "PAUSED", "FAILED", "COMPLETED")
     }
 
     Scaffold(
@@ -143,9 +144,11 @@ fun QueueScreen(
             } else {
                 items(activeAndQueuedJobs, key = { it.book.id }) { item ->
                     val jobWorkers = item.job?.let { activeWorkersByJob[it.id] } ?: 0
+                    val isExporting = exportingBookIds.contains(item.book.id)
                     QueueJobCard(
                         item = item,
                         jobActiveWorkers = jobWorkers,
+                        isExporting = isExporting,
                         onPause = onPauseJob,
                         onResume = onResumeJob,
                         onRetry = onRetryJob,
@@ -166,11 +169,12 @@ fun QueueScreen(
 fun QueueJobCard(
     item: BookWithJob,
     jobActiveWorkers: Int = 0,
+    isExporting: Boolean = false,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
     onRetry: (String) -> Unit,
     onCancel: (String) -> Unit,
-    onExport: (exportedFilePath: String, bookTitle: String) -> Unit
+    onExport: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit
 ) {
     val book = item.book
     val job = item.job ?: return
@@ -248,14 +252,14 @@ fun QueueJobCard(
             if (job.failedChunks > 0) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "${job.failedChunks} failed chunks",
+                    text = "Translation incomplete: ${job.failedChunks} chunks failed",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                     fontWeight = FontWeight.SemiBold
                 )
             }
 
-            if (job.errorMessage != null) {
+            if (job.errorMessage != null && job.failedChunks == 0) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
                     shape = RoundedCornerShape(8.dp),
@@ -320,8 +324,21 @@ fun QueueJobCard(
                         }
                     }
                     "COMPLETED" -> {
-                        if (job.exportedUri != null) {
-                            Button(onClick = { onExport(job.exportedUri, book.title) }) {
+                        Button(
+                            onClick = { onExport(book.id, book.title, job.exportedUri) },
+                            enabled = !isExporting
+                        ) {
+                            if (isExporting) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Exporting...")
+                            } else {
+                                Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text("Export")
                             }
                         }

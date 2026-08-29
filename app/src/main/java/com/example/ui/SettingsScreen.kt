@@ -1,10 +1,15 @@
 package com.example.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -12,11 +17,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.data.repository.AppSettings
+import com.example.ui.theme.TomatoRedPrimary
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -25,6 +33,7 @@ fun SettingsScreen(
     onSaveSettings: (AppSettings) -> Unit,
     onCheckForUpdates: () -> Unit
 ) {
+    var isDarkMode by remember(settings) { mutableStateOf(settings.isDarkMode) }
     var workerCount by remember(settings) { mutableFloatStateOf(settings.workerCount.toFloat()) }
     var maxActiveBooks by remember(settings) { mutableFloatStateOf(settings.maxActiveBooks.toFloat()) }
     var chunkSize by remember(settings) { mutableFloatStateOf(settings.chunkSize.toFloat()) }
@@ -33,6 +42,20 @@ fun SettingsScreen(
     var githubOwner by remember(settings) { mutableStateOf(settings.githubOwner) }
     var githubRepo by remember(settings) { mutableStateOf(settings.githubRepo) }
     var autoCheckUpdates by remember(settings) { mutableStateOf(settings.autoCheckUpdates) }
+
+    fun buildCurrentSettings(): AppSettings {
+        return AppSettings(
+            workerCount = workerCount.toInt(),
+            maxActiveBooks = maxActiveBooks.toInt(),
+            chunkSize = chunkSize.toInt(),
+            maxRetries = maxRetries.toInt(),
+            timeoutSeconds = timeoutSeconds.toInt(),
+            githubOwner = githubOwner.trim(),
+            githubRepo = githubRepo.trim(),
+            autoCheckUpdates = autoCheckUpdates,
+            isDarkMode = isDarkMode
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -54,6 +77,117 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Appearance & Theme Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Palette,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Appearance & Theme",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Tomato Light Theme Card Option
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    isDarkMode = false
+                                    onSaveSettings(buildCurrentSettings().copy(isDarkMode = false))
+                                }
+                                .testTag("theme_tomato_light_button"),
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (!isDarkMode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (!isDarkMode) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LightMode,
+                                    contentDescription = "Tomato Light",
+                                    tint = if (!isDarkMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "Tomato Light",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = if (!isDarkMode) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (!isDarkMode) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "White & Red",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (!isDarkMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                                )
+                            }
+                        }
+
+                        // Dark Mode Card Option
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    isDarkMode = true
+                                    onSaveSettings(buildCurrentSettings().copy(isDarkMode = true))
+                                }
+                                .testTag("theme_dark_button"),
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isDarkMode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (isDarkMode) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DarkMode,
+                                    contentDescription = "Dark Mode",
+                                    tint = if (isDarkMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "Dark Mode",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = if (isDarkMode) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isDarkMode) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "Night Theme",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isDarkMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Worker Concurrency Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -235,20 +369,7 @@ fun SettingsScreen(
 
             // Save Settings Button
             Button(
-                onClick = {
-                    onSaveSettings(
-                        AppSettings(
-                            workerCount = workerCount.toInt(),
-                            maxActiveBooks = maxActiveBooks.toInt(),
-                            chunkSize = chunkSize.toInt(),
-                            maxRetries = maxRetries.toInt(),
-                            timeoutSeconds = timeoutSeconds.toInt(),
-                            githubOwner = githubOwner.trim(),
-                            githubRepo = githubRepo.trim(),
-                            autoCheckUpdates = autoCheckUpdates
-                        )
-                    )
-                },
+                onClick = { onSaveSettings(buildCurrentSettings()) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp)

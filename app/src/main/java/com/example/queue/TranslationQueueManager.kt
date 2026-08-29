@@ -36,6 +36,7 @@ class TranslationQueueManager(
     private val workerJobs = mutableListOf<Job>()
     private var currentWorkerCount = 0
     private val roundRobinJobIndex = AtomicInteger(0)
+    private val finalizingJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     init {
         // Startup recovery:
@@ -378,72 +379,174 @@ class TranslationQueueManager(
         val total = database.chunkDao().getTotalChunkCount(jobId)
         val completed = database.chunkDao().getCompletedChunkCount(jobId)
         val failed = database.chunkDao().getFailedChunkCount(jobId)
+        val translating = database.chunkDao().getTranslatingChunkCount(jobId)
         val progress = if (total > 0) completed.toFloat() / total.toFloat() else 0f
 
         val currentJob = database.jobDao().getJobById(jobId) ?: return
 
-        // Preserve PAUSED, CANCELLED or FAILED statuses unless completed
-        val status = when {
-            total > 0 && completed == total -> "COMPLETED"
-            currentJob.status == "PAUSED" -> "PAUSED"
-            currentJob.status == "CANCELLED" -> "CANCELLED"
-            failed > 0 && (completed + failed == total) -> "FAILED"
-            else -> "RUNNING"
+        // If job is already COMPLETED, preserve status and only update counts
+        if (currentJob.status == "COMPLETED") {
+            database.jobDao().updateJobProgress(jobId, completed, failed, 1.0f, "COMPLETED")
+            return
         }
 
-        database.jobDao().updateJobProgress(jobId, completed, failed, progress, status)
+        // Preserve PAUSED or CANCELLED statuses
+        if (currentJob.status == "PAUSED" || currentJob.status == "CANCELLED") {
+            database.jobDao().updateJobProgress(jobId, completed, failed, progress, currentJob.status)
+            return
+        }
+
+        // When all chunks have completed, let checkAndFinalizeJob verify consistency and mark COMPLETED
+        if (total > 0 && completed == total && failed == 0 && translating == 0) {
+            return
+        }
+
+        // If chunks have failed and no pending or translating chunks remain, mark FAILED
+        if (failed > 0 && (completed + failed == total) && translating == 0) {
+            val errorMsg = "Translation incomplete: $failed chunks failed"
+            database.jobDao().updateJob(
+                currentJob.copy(
+                    status = "FAILED",
+                    completedChunks = completed,
+                    failedChunks = failed,
+                    progress = progress,
+                    errorMessage = errorMsg,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            return
+        }
+
+        // Otherwise job is actively RUNNING
+        database.jobDao().updateJobProgress(jobId, completed, failed, progress, "RUNNING")
+    }
+
+    private data class ConsistencyResult(val isValid: Boolean, val errorMessage: String? = null)
+
+    private suspend fun verifyJobTranslationConsistency(
+        jobId: String,
+        bookId: String,
+        expectedTotalChunks: Int
+    ): ConsistencyResult {
+        val totalInDb = database.chunkDao().getTotalChunkCount(jobId)
+        val completedInDb = database.chunkDao().getCompletedChunkCount(jobId)
+        val incompleteInDb = database.chunkDao().getIncompleteChunkCount(jobId)
+
+        if (totalInDb != expectedTotalChunks || completedInDb != expectedTotalChunks || incompleteInDb > 0) {
+            return ConsistencyResult(
+                false,
+                "Chunk count mismatch: expected $expectedTotalChunks, total in db $totalInDb, completed in db $completedInDb, incomplete $incompleteInDb"
+            )
+        }
+
+        val chapters = database.chapterDao().getChaptersByBook(bookId)
+        if (chapters.isEmpty()) {
+            return ConsistencyResult(false, "No chapters found for book $bookId")
+        }
+
+        // Verify every chapter has correct order, body chunks, and translated results
+        for (i in chapters.indices) {
+            val ch = chapters[i]
+            if (ch.chapterOrder != i) {
+                return ConsistencyResult(false, "Chapter order mismatch at index $i: expected $i, found ${ch.chapterOrder}")
+            }
+
+            val chChunks = database.chunkDao().getChunksByJobAndChapter(jobId, ch.id)
+            if (chChunks.isEmpty()) {
+                return ConsistencyResult(false, "No chunks found for chapter ${ch.id} (index $i: ${ch.title})")
+            }
+
+            val sortedChunks = chChunks.sortedBy { it.chunkOrder }
+            for (cIdx in sortedChunks.indices) {
+                val chunk = sortedChunks[cIdx]
+                if (chunk.chunkOrder != cIdx) {
+                    return ConsistencyResult(false, "Chunk order mismatch in chapter '${ch.title}': expected order $cIdx, found ${chunk.chunkOrder}")
+                }
+                if (chunk.status != "COMPLETED" || chunk.translatedText.isNullOrBlank()) {
+                    return ConsistencyResult(false, "Incomplete translation for chunk ${chunk.id} in chapter '${ch.title}'")
+                }
+            }
+        }
+
+        // Verify Title chunk if present
+        val titleChunk = database.chunkDao().getTitleChunk(jobId)
+        if (titleChunk != null && (titleChunk.status != "COMPLETED" || titleChunk.translatedText.isNullOrBlank())) {
+            return ConsistencyResult(false, "Book title translation chunk is not completed")
+        }
+
+        // Verify Description chunk if present
+        val descChunk = database.chunkDao().getDescriptionChunk(jobId)
+        if (descChunk != null && (descChunk.status != "COMPLETED" || descChunk.translatedText.isNullOrBlank())) {
+            return ConsistencyResult(false, "Book description translation chunk is not completed")
+        }
+
+        return ConsistencyResult(true)
     }
 
     private suspend fun checkAndFinalizeJob(jobId: String) {
+        val job = database.jobDao().getJobById(jobId) ?: return
+        if (job.status == "COMPLETED" || job.status == "CANCELLED" || job.status == "PAUSED") return
+
         val total = database.chunkDao().getTotalChunkCount(jobId)
         val completed = database.chunkDao().getCompletedChunkCount(jobId)
         val failed = database.chunkDao().getFailedChunkCount(jobId)
+        val translating = database.chunkDao().getTranslatingChunkCount(jobId)
+        val incomplete = database.chunkDao().getIncompleteChunkCount(jobId)
 
-        val job = database.jobDao().getJobById(jobId) ?: return
-        if (job.status == "COMPLETED" || job.status == "CANCELLED") return
-
-        if (total > 0 && completed == total) {
-            // Rebuild final English EPUB
-            try {
-                val book = database.bookDao().getBookById(job.bookId) ?: return
-                val bookDir = File(context.filesDir, "books/${book.id}")
-                val sourceEpubFile = File(bookDir, "source.epub")
-                val parsedEpub = EpubParser.parse(sourceEpubFile)
-
-                val chapters = database.chapterDao().getChaptersByBook(book.id)
-                val chunks = database.chunkDao().getChunksByJob(jobId)
-
-                // Retrieve translated title if available, otherwise fall back to original book title
-                val translatedTitle = chunks.firstOrNull { it.chunkType == "TITLE" }?.translatedText?.takeIf { it.isNotBlank() }
-                    ?: book.title
-                val exportName = "${sanitizeFileName(translatedTitle)}.epub"
-                val exportFile = File(bookDir, exportName)
-
-                EpubRebuilder.rebuild(parsedEpub, chapters, chunks, exportFile)
-
-                database.jobDao().updateJob(
-                    job.copy(
-                        status = "COMPLETED",
-                        progress = 1.0f,
-                        completedChunks = completed,
-                        failedChunks = 0,
-                        exportedUri = exportFile.absolutePath,
-                        exportedFileName = exportName,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
-            } catch (e: Exception) {
-                Log.e("QueueManager", "Failed to rebuild EPUB for job $jobId", e)
+        // If any chunk is still translating, pending, or incomplete, the book must NOT be marked COMPLETED
+        if (translating > 0 || incomplete > 0 || completed < total) {
+            if (failed > 0 && (completed + failed == total) && translating == 0) {
+                val errorMsg = "Translation incomplete: $failed chunks failed"
                 database.jobDao().updateJob(
                     job.copy(
                         status = "FAILED",
-                        errorMessage = "Rebuild failed: ${e.message}",
+                        completedChunks = completed,
+                        failedChunks = failed,
+                        progress = if (total > 0) completed.toFloat() / total.toFloat() else 0f,
+                        errorMessage = errorMsg,
                         updatedAt = System.currentTimeMillis()
                     )
                 )
             }
-        } else if (failed > 0 && (completed + failed == total)) {
-            database.jobDao().updateJobStatus(jobId, "FAILED")
+            return
+        }
+
+        // When total == completed and 0 failed/translating/incomplete
+        if (total > 0 && completed == total && failed == 0 && translating == 0 && incomplete == 0) {
+            if (!finalizingJobIds.add(jobId)) {
+                return // Finalization already in progress
+            }
+
+            try {
+                // Strict final consistency check
+                val consistency = verifyJobTranslationConsistency(jobId, job.bookId, total)
+                if (!consistency.isValid) {
+                    Log.e("QueueManager", "Consistency check failed for job $jobId: ${consistency.errorMessage}")
+                    database.jobDao().updateJob(
+                        job.copy(
+                            status = "FAILED",
+                            errorMessage = "Translation consistency check failed: ${consistency.errorMessage}",
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                    return
+                }
+
+                // Translation is 100% verified and COMPLETED!
+                database.jobDao().updateJob(
+                    job.copy(
+                        status = "COMPLETED",
+                        progress = 1.0f,
+                        completedChunks = total,
+                        failedChunks = 0,
+                        errorMessage = null,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                Log.i("QueueManager", "Job $jobId translation COMPLETED successfully ($total chunks verified).")
+            } finally {
+                finalizingJobIds.remove(jobId)
+            }
         }
     }
 

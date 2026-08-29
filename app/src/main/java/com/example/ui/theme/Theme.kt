@@ -1,41 +1,62 @@
 package com.example.ui.theme
 
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
 
-private val DarkColorScheme = darkColorScheme(
-    primary = ElegantPurple,
-    onPrimary = ElegantPurpleOnPrimary,
-    primaryContainer = ElegantPurpleContainer,
-    onPrimaryContainer = ElegantPurpleOnContainer,
-    secondary = ElegantSecondary,
-    secondaryContainer = ElegantSecondaryContainer,
-    onSecondaryContainer = ElegantOnSecondaryContainer,
-    background = DarkBackground,
-    onBackground = ElegantTextPrimary,
-    surface = DarkSurface,
-    onSurface = ElegantTextPrimary,
-    surfaceVariant = DarkSurfaceVariant,
-    onSurfaceVariant = ElegantTextSecondary,
-    outline = DarkOutlineVariant,
-    outlineVariant = DarkOutline
+private val TomatoLightColorScheme = lightColorScheme(
+    primary = TomatoRedPrimary,
+    onPrimary = TomatoRedOnPrimary,
+    primaryContainer = TomatoRedPrimaryContainer,
+    onPrimaryContainer = TomatoRedOnPrimaryContainer,
+    secondary = TomatoRedSecondary,
+    onSecondary = TomatoRedOnSecondary,
+    secondaryContainer = TomatoRedSecondaryContainer,
+    onSecondaryContainer = TomatoRedOnSecondaryContainer,
+    tertiary = TomatoRedTertiary,
+    onTertiary = TomatoRedOnTertiary,
+    tertiaryContainer = TomatoRedTertiaryContainer,
+    onTertiaryContainer = TomatoRedOnTertiaryContainer,
+    background = TomatoLightBackground,
+    onBackground = TomatoLightOnBackground,
+    surface = TomatoLightSurface,
+    onSurface = TomatoLightOnSurface,
+    surfaceVariant = TomatoLightSurfaceVariant,
+    onSurfaceVariant = TomatoLightOnSurfaceVariant,
+    outline = TomatoLightOutline,
+    outlineVariant = TomatoLightOutlineVariant
 )
 
-private val LightColorScheme = DarkColorScheme // Default to Elegant Dark styling
+private val DarkColorScheme = darkColorScheme(
+    primary = DarkTomatoPrimary,
+    onPrimary = DarkTomatoOnPrimary,
+    primaryContainer = DarkTomatoPrimaryContainer,
+    onPrimaryContainer = DarkTomatoOnPrimaryContainer,
+    secondary = DarkTomatoSecondary,
+    onSecondary = DarkTomatoOnSecondary,
+    secondaryContainer = DarkTomatoSecondaryContainer,
+    onSecondaryContainer = DarkTomatoOnSecondaryContainer,
+    background = DarkBackground,
+    onBackground = DarkTextPrimary,
+    surface = DarkSurface,
+    onSurface = DarkTextPrimary,
+    surfaceVariant = DarkSurfaceVariant,
+    onSurfaceVariant = DarkTextSecondary,
+    outline = DarkOutline,
+    outlineVariant = DarkOutlineVariant
+)
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = true,
-    dynamicColor: Boolean = false,
+    darkTheme: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = DarkColorScheme
-    MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
+    val colorScheme = if (darkTheme) DarkColorScheme else TomatoLightColorScheme
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        content = content
+    )
 }
+

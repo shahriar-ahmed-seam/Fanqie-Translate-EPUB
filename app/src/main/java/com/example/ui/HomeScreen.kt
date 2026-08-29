@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -31,11 +32,12 @@ fun HomeScreen(
     booksWithJobs: List<BookWithJob>,
     activeWorkers: Int,
     activeWorkersByJob: Map<String, Int> = emptyMap(),
+    exportingBookIds: Set<String> = emptySet(),
     isProcessing: Boolean,
     onSelectSingleEpub: (Uri) -> Unit,
     onSelectMultipleEpubs: (List<Uri>) -> Unit,
     onNavigateToQueue: () -> Unit,
-    onExportEpub: (exportedFilePath: String, bookTitle: String) -> Unit,
+    onExportEpub: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit,
     onPauseJob: (String) -> Unit,
     onResumeJob: (String) -> Unit,
     onRetryJob: (String) -> Unit,
@@ -219,9 +221,11 @@ fun HomeScreen(
             } else {
                 items(booksWithJobs, key = { it.book.id }) { item ->
                     val jobWorkers = item.job?.let { activeWorkersByJob[it.id] } ?: 0
+                    val isExporting = exportingBookIds.contains(item.book.id)
                     BookJobCard(
                         item = item,
                         jobActiveWorkers = jobWorkers,
+                        isExporting = isExporting,
                         onExport = onExportEpub,
                         onPause = onPauseJob,
                         onResume = onResumeJob,
@@ -243,7 +247,8 @@ fun HomeScreen(
 fun BookJobCard(
     item: BookWithJob,
     jobActiveWorkers: Int = 0,
-    onExport: (exportedFilePath: String, bookTitle: String) -> Unit,
+    isExporting: Boolean = false,
+    onExport: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
     onRetry: (String) -> Unit,
@@ -356,6 +361,27 @@ fun BookJobCard(
                         )
                     }
                 }
+
+                if (job.failedChunks > 0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Translation incomplete: ${job.failedChunks} chunks failed",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (job.errorMessage != null && job.failedChunks == 0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = job.errorMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -383,16 +409,23 @@ fun BookJobCard(
                 when (job?.status) {
                     "COMPLETED" -> {
                         Button(
-                            onClick = {
-                                if (job.exportedUri != null) {
-                                    onExport(job.exportedUri, book.title)
-                                }
-                            },
+                            onClick = { onExport(book.id, book.title, job.exportedUri) },
+                            enabled = !isExporting,
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                         ) {
-                            Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Export English EPUB")
+                            if (isExporting) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Exporting...")
+                            } else {
+                                Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Export English EPUB")
+                            }
                         }
                     }
                     "RUNNING", "TRANSLATING" -> {
@@ -447,14 +480,43 @@ fun BookJobCard(
 
 @Composable
 fun StatusBadge(status: String) {
+    val isLight = MaterialTheme.colorScheme.surface.luminance() > 0.5f
     val (bgColor, textColor, borderColor) = when (status) {
-        "COMPLETED" -> Triple(Color(0xFF1E3A24), Color(0xFFA5D6A7), Color(0xFF2E7D32))
-        "RUNNING", "TRANSLATING" -> Triple(Color(0x33D0BCFF), Color(0xFFD0BCFF), Color(0x66D0BCFF))
-        "QUEUED" -> Triple(Color(0xFF1A2E3E), Color(0xFF90CAF9), Color(0xFF1565C0))
-        "PAUSED" -> Triple(Color(0xFF3E2D1A), Color(0xFFFFCC80), Color(0xFFE65100))
-        "FAILED" -> Triple(Color(0xFF3E1F24), Color(0xFFEF9A9A), Color(0xFFC62828))
-        "CANCELLED" -> Triple(Color(0xFF2B2930), Color(0xFF9E9E9E), Color(0xFF616161))
-        else -> Triple(Color(0xFF2B2930), Color(0xFFCAC4D0), Color(0xFF49454F))
+        "COMPLETED" -> if (isLight) {
+            Triple(Color(0xFFE8F5E9), Color(0xFF2E7D32), Color(0xFFA5D6A7))
+        } else {
+            Triple(Color(0xFF1E3A24), Color(0xFFA5D6A7), Color(0xFF2E7D32))
+        }
+        "RUNNING", "TRANSLATING" -> if (isLight) {
+            Triple(Color(0xFFFFEBEE), Color(0xFFC62828), Color(0xFFEF9A9A))
+        } else {
+            Triple(Color(0xFF4A1012), Color(0xFFFF8A80), Color(0xFFEF5350))
+        }
+        "QUEUED" -> if (isLight) {
+            Triple(Color(0xFFE3F2FD), Color(0xFF1565C0), Color(0xFF90CAF9))
+        } else {
+            Triple(Color(0xFF1A2E3E), Color(0xFF90CAF9), Color(0xFF1565C0))
+        }
+        "PAUSED" -> if (isLight) {
+            Triple(Color(0xFFFFF3E0), Color(0xFFE65100), Color(0xFFFFCC80))
+        } else {
+            Triple(Color(0xFF3E2D1A), Color(0xFFFFCC80), Color(0xFFE65100))
+        }
+        "FAILED" -> if (isLight) {
+            Triple(Color(0xFFFFEBEE), Color(0xFFB71C1C), Color(0xFFEF5350))
+        } else {
+            Triple(Color(0xFF3E1F24), Color(0xFFEF9A9A), Color(0xFFC62828))
+        }
+        "CANCELLED" -> if (isLight) {
+            Triple(Color(0xFFF5F5F5), Color(0xFF616161), Color(0xFFE0E0E0))
+        } else {
+            Triple(Color(0xFF2B2930), Color(0xFF9E9E9E), Color(0xFF616161))
+        }
+        else -> if (isLight) {
+            Triple(Color(0xFFF5F5F5), Color(0xFF424242), Color(0xFFE0E0E0))
+        } else {
+            Triple(Color(0xFF2B2930), Color(0xFFCAC4D0), Color(0xFF49454F))
+        }
     }
 
     Surface(

@@ -47,7 +47,8 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            MyApplicationTheme {
+            val settings by viewModel.settings.collectAsStateWithLifecycle()
+            MyApplicationTheme(darkTheme = settings.isDarkMode) {
                 MainApp(viewModel = viewModel)
             }
         }
@@ -64,6 +65,7 @@ fun MainApp(viewModel: MainViewModel) {
     val activeWorkers by viewModel.activeWorkers.collectAsStateWithLifecycle()
     val activeWorkersByJob by viewModel.activeWorkersByJob.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
+    val exportingBookIds by viewModel.exportingBookIds.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val previewState by viewModel.previewState.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
@@ -79,26 +81,25 @@ fun MainApp(viewModel: MainViewModel) {
     }
 
     // SAF Document Export Handler
+    var pendingExportBookId by remember { mutableStateOf<String?>(null) }
     var pendingExportSourcePath by remember { mutableStateOf<String?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/epub+zip")
     ) { destinationUri: Uri? ->
+        val bookId = pendingExportBookId
         val sourcePath = pendingExportSourcePath
-        if (destinationUri != null && sourcePath != null) {
-            viewModel.exportEpubToUri(context, sourcePath, destinationUri)
+        if (destinationUri != null && bookId != null) {
+            viewModel.exportEpubToUri(context, bookId, sourcePath, destinationUri)
         }
+        pendingExportBookId = null
         pendingExportSourcePath = null
     }
 
-    val onExport: (String, String) -> Unit = { sourcePath, bookTitle ->
+    val onExport: (String, String, String?) -> Unit = { bookId, bookTitle, sourcePath ->
+        pendingExportBookId = bookId
         pendingExportSourcePath = sourcePath
-        val file = File(sourcePath)
-        val exportFileName = if (file.name.endsWith(".epub", ignoreCase = true)) {
-            file.name
-        } else {
-            val safeName = bookTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
-            "$safeName.epub"
-        }
+        val safeName = bookTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "novel" }
+        val exportFileName = if (safeName.endsWith(".epub", ignoreCase = true)) safeName else "$safeName.epub"
         exportLauncher.launch(exportFileName)
     }
 
@@ -152,6 +153,7 @@ fun MainApp(viewModel: MainViewModel) {
                     booksWithJobs = booksWithJobs,
                     activeWorkers = activeWorkers,
                     activeWorkersByJob = activeWorkersByJob,
+                    exportingBookIds = exportingBookIds,
                     isProcessing = isProcessing,
                     onSelectSingleEpub = { viewModel.previewSingleEpub(it) },
                     onSelectMultipleEpubs = { viewModel.importMultipleEpubs(it) },
@@ -166,6 +168,7 @@ fun MainApp(viewModel: MainViewModel) {
                     booksWithJobs = booksWithJobs,
                     activeWorkers = activeWorkers,
                     activeWorkersByJob = activeWorkersByJob,
+                    exportingBookIds = exportingBookIds,
                     settings = settings,
                     onPauseJob = { viewModel.pauseJob(it) },
                     onResumeJob = { viewModel.resumeJob(it) },
