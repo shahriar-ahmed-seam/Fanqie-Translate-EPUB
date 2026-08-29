@@ -26,8 +26,12 @@ import java.io.FileOutputStream
 
 data class BookWithJob(
     val book: BookEntity,
-    val job: TranslationJobEntity?
-)
+    val job: TranslationJobEntity?,
+    val translatedTitle: String? = null
+) {
+    val displayTitle: String
+        get() = translatedTitle?.takeIf { it.isNotBlank() } ?: book.title
+}
 
 data class BookPreviewState(
     val uri: Uri,
@@ -51,10 +55,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val allBooksWithJobs: StateFlow<List<BookWithJob>> = combine(
         database.bookDao().getAllBooks(),
-        database.jobDao().getAllJobs()
-    ) { books, jobs ->
+        database.jobDao().getAllJobs(),
+        database.chunkDao().observeAllTitleChunks()
+    ) { books, jobs, titleChunks ->
         val jobMap = jobs.associateBy { it.bookId }
-        books.map { BookWithJob(it, jobMap[it.id]) }
+        val titleMap = titleChunks.associate { it.bookId to it.translatedText?.takeIf { t -> t.isNotBlank() } }
+        books.map { BookWithJob(it, jobMap[it.id], titleMap[it.id]) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val activeWorkersByJob: StateFlow<Map<String, Int>> = queueManager.activeWorkersByJob

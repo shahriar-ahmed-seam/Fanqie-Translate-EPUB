@@ -194,7 +194,7 @@ fun QueueJobCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = book.title,
+                    text = item.displayTitle,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
@@ -336,7 +336,7 @@ fun QueueJobCard(
                     }
                     "COMPLETED" -> {
                         Button(
-                            onClick = { onExport(book.id, book.title, job.exportedUri) },
+                            onClick = { onExport(book.id, item.displayTitle, job.exportedUri) },
                             enabled = !isExporting
                         ) {
                             if (isExporting) {

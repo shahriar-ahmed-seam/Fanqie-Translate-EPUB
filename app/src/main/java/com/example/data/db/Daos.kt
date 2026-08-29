@@ -81,6 +81,11 @@ interface ChapterDao {
     suspend fun deleteChaptersByBook(bookId: String)
 }
 
+data class BookTitleTuple(
+    val bookId: String,
+    val translatedText: String?
+)
+
 data class ChapterTitleTuple(
     val chapterId: String,
     val translatedText: String?
@@ -135,6 +140,12 @@ interface TranslationChunkDao {
 
     @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'TITLE' LIMIT 1")
     suspend fun getTitleChunkByBook(bookId: String): TranslationChunkEntity?
+
+    @Query("SELECT bookId, translatedText FROM translation_chunks WHERE chunkType = 'TITLE' AND translatedText IS NOT NULL AND translatedText != ''")
+    fun observeAllTitleChunks(): Flow<List<BookTitleTuple>>
+
+    @Query("SELECT bookId, translatedText FROM translation_chunks WHERE chunkType = 'TITLE' AND translatedText IS NOT NULL AND translatedText != ''")
+    suspend fun getAllTitleChunks(): List<BookTitleTuple>
 
     @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'DESCRIPTION' LIMIT 1")
     suspend fun getDescriptionChunkByBook(bookId: String): TranslationChunkEntity?

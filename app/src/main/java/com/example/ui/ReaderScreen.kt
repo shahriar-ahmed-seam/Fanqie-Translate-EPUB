@@ -66,8 +66,17 @@ fun ReaderScreen(
     val nextChapter = if (currentChapterIndex >= 0 && currentChapterIndex < chapters.size - 1) chapters[currentChapterIndex + 1] else null
 
     var chapterTitle by remember { mutableStateOf("") }
+    var chapterTitlesMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var paragraphs by remember { mutableStateOf<List<String>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+
+    // Load translated chapter titles map for TOC and header
+    LaunchedEffect(bookId) {
+        withContext(Dispatchers.IO) {
+            val titleChunks = db.chunkDao().getChapterTitlesByBook(bookId)
+            chapterTitlesMap = titleChunks.associate { it.chapterId to (it.translatedText ?: "") }
+        }
+    }
 
     // Reader Customization State
     var fontSize by remember { mutableFloatStateOf(17f) }
@@ -77,6 +86,7 @@ fun ReaderScreen(
     var showChapterPickerSheet by remember { mutableStateOf(false) }
 
     val scrollState = rememberScrollState()
+    val tocListState = rememberLazyListState()
 
     // Load translated chapter content whenever currentChapterId changes
     LaunchedEffect(currentChapterId) {
@@ -96,7 +106,8 @@ fun ReaderScreen(
                 }
 
                 val titleChunk = chunks.firstOrNull { it.chunkType == "CHAPTER_TITLE" }
-                chapterTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: chapter.title
+                val resolvedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() } ?: chapter.title
+                chapterTitle = resolvedTitle
 
                 val bodyChunks = chunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
                 if (bodyChunks.isNotEmpty()) {
@@ -122,6 +133,17 @@ fun ReaderScreen(
         isLoading = false
     }
 
+    LaunchedEffect(showChapterPickerSheet) {
+        if (showChapterPickerSheet && currentChapterIndex >= 0) {
+            tocListState.scrollToItem((currentChapterIndex - 2).coerceAtLeast(0))
+        }
+    }
+
+    val displayHeaderTitle = chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() }
+        ?: chapterTitle.takeIf { it.isNotBlank() }
+        ?: currentChapter?.title
+        ?: "Chapter ${currentChapterIndex + 1}"
+
     val contentBgColor = if (selectedTheme == ReaderTheme.SYSTEM) MaterialTheme.colorScheme.background else selectedTheme.bg
     val contentTextColor = if (selectedTheme == ReaderTheme.SYSTEM) MaterialTheme.colorScheme.onBackground else selectedTheme.text
 
@@ -130,7 +152,7 @@ fun ReaderScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = chapterTitle.ifBlank { "Chapter ${currentChapterIndex + 1}" },
+                        text = displayHeaderTitle,
                         maxLines = 1,
                         style = MaterialTheme.typography.titleMedium
                     )
@@ -232,7 +254,7 @@ fun ReaderScreen(
                 ) {
                     // Chapter Title Header
                     Text(
-                        text = chapterTitle,
+                        text = displayHeaderTitle,
                         style = MaterialTheme.typography.headlineSmall.copy(
                             fontSize = (fontSize + 5).sp,
                             lineHeight = ((fontSize + 5) * 1.3f).sp
@@ -262,32 +284,6 @@ fun ReaderScreen(
                     }
 
                     Spacer(modifier = Modifier.height(32.dp))
-
-                    // Chapter End Navigation Prompts
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        if (prevChapter != null) {
-                            OutlinedButton(
-                                onClick = { currentChapterId = prevChapter.id }
-                            ) {
-                                Text("← Previous Chapter")
-                            }
-                        } else {
-                            Spacer(modifier = Modifier.width(1.dp))
-                        }
-
-                        if (nextChapter != null) {
-                            Button(
-                                onClick = { currentChapterId = nextChapter.id }
-                            ) {
-                                Text("Next Chapter →")
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
                 }
             }
         }
@@ -386,11 +382,15 @@ fun ReaderScreen(
                 )
 
                 LazyColumn(
+                    state = tocListState,
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     items(chapters, key = { it.id }) { chapter ->
                         val isCurrent = chapter.id == currentChapterId
+                        val trTitle = chapterTitlesMap[chapter.id]?.takeIf { it.isNotBlank() }
+                        val displayChapterTitle = trTitle ?: chapter.title
+
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
@@ -413,13 +413,25 @@ fun ReaderScreen(
                                     color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
 
-                                Text(
-                                    text = chapter.title,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f)
-                                )
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = displayChapterTitle,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                    )
+
+                                    if (trTitle != null && trTitle != chapter.title) {
+                                        Text(
+                                            text = chapter.title,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
 
                                 if (isCurrent) {
                                     Icon(

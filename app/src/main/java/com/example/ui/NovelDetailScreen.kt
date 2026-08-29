@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -92,6 +94,56 @@ fun NovelDetailScreen(
     var showRangeDialog by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
+    // Expandable Grouping by 100
+    var expandedGroupIndices by rememberSaveable {
+        val initialSet = mutableSetOf<Int>()
+        val targetIndex = if (lastReadChapterId != null) {
+            val ch = chapters.firstOrNull { it.id == lastReadChapterId }
+            if (ch != null) ch.chapterOrder / 100 else 0
+        } else 0
+        initialSet.add(targetIndex)
+        mutableStateOf(initialSet.toSet())
+    }
+
+    LaunchedEffect(chapters, lastReadChapterId) {
+        if (chapters.isNotEmpty() && expandedGroupIndices.isEmpty()) {
+            val targetIndex = if (lastReadChapterId != null) {
+                val ch = chapters.firstOrNull { it.id == lastReadChapterId }
+                if (ch != null) ch.chapterOrder / 100 else 0
+            } else 0
+            expandedGroupIndices = setOf(targetIndex)
+        }
+    }
+
+    val displayTitle = translatedTitle ?: currentBookJob?.book?.title ?: "Novel Details"
+    val originalTitle = currentBookJob?.book?.title
+    val author = currentBookJob?.book?.author ?: "Unknown"
+    val displayDesc = translatedDescription ?: currentBookJob?.book?.description ?: "No description available."
+    val coverPath = currentBookJob?.book?.coverPath
+
+    val totalChapters = chapters.size
+    val translatedChaptersCount = chapters.count { chapter ->
+        val prog = chapterProgressMap[chapter.id]
+        prog != null && prog.second > 0 && prog.first >= prog.second
+    }
+
+    // Grouping by 100 chapters
+    val chapterGroups = remember(chapters) {
+        if (chapters.isEmpty()) emptyList()
+        else {
+            chapters.chunked(100).mapIndexed { index, groupList ->
+                val startNum = groupList.first().chapterOrder + 1
+                val endNum = groupList.last().chapterOrder + 1
+                ChapterGroup(
+                    groupIndex = index,
+                    startChapterNum = startNum,
+                    endChapterNum = endNum,
+                    chapters = groupList
+                )
+            }
+        }
+    }
+
     // SAF File Creator Launcher for Selected / Range Export
     var pendingExportTitle by remember { mutableStateOf<String?>(null) }
     var pendingExportChapterIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -116,18 +168,6 @@ fun NovelDetailScreen(
         if (uri != null) {
             viewModel.exportEnglishEpub(context, bookId, uri)
         }
-    }
-
-    val displayTitle = translatedTitle ?: currentBookJob?.book?.title ?: "Novel Details"
-    val originalTitle = currentBookJob?.book?.title
-    val author = currentBookJob?.book?.author ?: "Unknown"
-    val displayDesc = translatedDescription ?: currentBookJob?.book?.description ?: "No description available."
-    val coverPath = currentBookJob?.book?.coverPath
-
-    val totalChapters = chapters.size
-    val translatedChaptersCount = chapters.count { chapter ->
-        val prog = chapterProgressMap[chapter.id]
-        prog != null && prog.second > 0 && prog.first >= prog.second
     }
 
     val listState = rememberLazyListState()
@@ -191,10 +231,20 @@ fun NovelDetailScreen(
                         if (selectedChapterIds.isNotEmpty()) {
                             IconButton(
                                 onClick = {
-                                    val safeTitle = "${displayTitle}_Selected_${selectedChapterIds.size}_Chapters"
-                                    pendingExportTitle = safeTitle
+                                    val sortedSelected = chapters.filter { selectedChapterIds.contains(it.id) }.sortedBy { it.chapterOrder }
+                                    val cleanBookTitle = displayTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "Novel" }
+                                    val (exportTitle, defaultFilename) = if (sortedSelected.size == chapters.size && chapters.isNotEmpty()) {
+                                        cleanBookTitle to "$cleanBookTitle.epub"
+                                    } else if (sortedSelected.isNotEmpty()) {
+                                        val startNum = sortedSelected.first().chapterOrder + 1
+                                        val endNum = sortedSelected.last().chapterOrder + 1
+                                        val rangeStr = if (startNum == endNum) "Chapter $startNum" else "Chapter $startNum-$endNum"
+                                        "$cleanBookTitle $rangeStr" to "$cleanBookTitle $rangeStr.epub"
+                                    } else {
+                                        cleanBookTitle to "$cleanBookTitle.epub"
+                                    }
+                                    pendingExportTitle = exportTitle
                                     pendingExportChapterIds = selectedChapterIds.toSet()
-                                    val defaultFilename = "${safeTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_")}.epub"
                                     exportLauncher.launch(defaultFilename)
                                 },
                                 modifier = Modifier.testTag("export_selected_button")
@@ -218,7 +268,8 @@ fun NovelDetailScreen(
 
                         IconButton(
                             onClick = {
-                                val defaultFilename = "${displayTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_")}_English.epub"
+                                val cleanBookTitle = displayTitle.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "Novel" }
+                                val defaultFilename = "$cleanBookTitle.epub"
                                 fullExportLauncher.launch(defaultFilename)
                             },
                             enabled = !isExporting,
@@ -431,41 +482,121 @@ fun NovelDetailScreen(
                 }
             }
 
-            // Chapter List Items
-            itemsIndexed(
-                items = filteredChapters,
-                key = { _, chapter -> chapter.id }
-            ) { index, chapter ->
-                val trTitle = chapterTitlesMap[chapter.id]?.takeIf { it.isNotBlank() }
-                val displayChapterTitle = trTitle ?: chapter.title
-                val isSelected = selectedChapterIds.contains(chapter.id)
-                val isLastRead = chapter.id == lastReadChapterId
-                val prog = chapterProgressMap[chapter.id]
-                val isFullyTranslated = prog != null && prog.second > 0 && prog.first >= prog.second
+            if (searchQuery.isNotBlank()) {
+                // Flat filtered list when search is active
+                itemsIndexed(
+                    items = filteredChapters,
+                    key = { _, chapter -> chapter.id }
+                ) { index, chapter ->
+                    val trTitle = chapterTitlesMap[chapter.id]?.takeIf { it.isNotBlank() }
+                    val displayChapterTitle = trTitle ?: chapter.title
+                    val isSelected = selectedChapterIds.contains(chapter.id)
+                    val isLastRead = chapter.id == lastReadChapterId
+                    val prog = chapterProgressMap[chapter.id]
+                    val isFullyTranslated = prog != null && prog.second > 0 && prog.first >= prog.second
 
-                ChapterListItem(
-                    chapterNumber = chapter.chapterOrder + 1,
-                    title = displayChapterTitle,
-                    originalTitle = if (trTitle != null && trTitle != chapter.title) chapter.title else null,
-                    isSelectionMode = isSelectionMode,
-                    isSelected = isSelected,
-                    isLastRead = isLastRead,
-                    isTranslated = isFullyTranslated,
-                    progress = prog,
-                    onToggleSelect = {
-                        if (isSelected) selectedChapterIds.remove(chapter.id)
-                        else selectedChapterIds.add(chapter.id)
-                    },
-                    onClick = {
-                        if (isSelectionMode) {
+                    ChapterListItem(
+                        chapterNumber = chapter.chapterOrder + 1,
+                        title = displayChapterTitle,
+                        originalTitle = if (trTitle != null && trTitle != chapter.title) chapter.title else null,
+                        isSelectionMode = isSelectionMode,
+                        isSelected = isSelected,
+                        isLastRead = isLastRead,
+                        isTranslated = isFullyTranslated,
+                        progress = prog,
+                        onToggleSelect = {
                             if (isSelected) selectedChapterIds.remove(chapter.id)
                             else selectedChapterIds.add(chapter.id)
-                        } else {
-                            viewModel.setLastReadChapterId(bookId, chapter.id)
-                            onOpenReader(chapter.id)
+                        },
+                        onClick = {
+                            if (isSelectionMode) {
+                                if (isSelected) selectedChapterIds.remove(chapter.id)
+                                else selectedChapterIds.add(chapter.id)
+                            } else {
+                                viewModel.setLastReadChapterId(bookId, chapter.id)
+                                onOpenReader(chapter.id)
+                            }
+                        }
+                    )
+                }
+            } else {
+                // Grouped into expandable ranges of 100
+                chapterGroups.forEach { group ->
+                    val isExpanded = expandedGroupIndices.contains(group.groupIndex)
+                    val translatedInGroup = group.chapters.count { ch ->
+                        val prog = chapterProgressMap[ch.id]
+                        prog != null && prog.second > 0 && prog.first >= prog.second
+                    }
+                    val selectedInGroup = group.chapters.count { selectedChapterIds.contains(it.id) }
+
+                    item(key = "group_header_${group.groupIndex}") {
+                        ChapterGroupHeader(
+                            group = group,
+                            isExpanded = isExpanded,
+                            translatedCount = translatedInGroup,
+                            isSelectionMode = isSelectionMode,
+                            selectedInGroupCount = selectedInGroup,
+                            onToggleExpand = {
+                                expandedGroupIndices = if (isExpanded) {
+                                    expandedGroupIndices - group.groupIndex
+                                } else {
+                                    expandedGroupIndices + group.groupIndex
+                                }
+                            },
+                            onToggleSelectGroup = {
+                                val allSelected = selectedInGroup == group.chapters.size && group.chapters.isNotEmpty()
+                                if (allSelected) {
+                                    group.chapters.forEach { selectedChapterIds.remove(it.id) }
+                                } else {
+                                    group.chapters.forEach {
+                                        if (!selectedChapterIds.contains(it.id)) {
+                                            selectedChapterIds.add(it.id)
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+
+                    if (isExpanded) {
+                        items(
+                            items = group.chapters,
+                            key = { it.id }
+                        ) { chapter ->
+                            val trTitle = chapterTitlesMap[chapter.id]?.takeIf { it.isNotBlank() }
+                            val displayChapterTitle = trTitle ?: chapter.title
+                            val isSelected = selectedChapterIds.contains(chapter.id)
+                            val isLastRead = chapter.id == lastReadChapterId
+                            val prog = chapterProgressMap[chapter.id]
+                            val isFullyTranslated = prog != null && prog.second > 0 && prog.first >= prog.second
+
+                            ChapterListItem(
+                                chapterNumber = chapter.chapterOrder + 1,
+                                title = displayChapterTitle,
+                                originalTitle = if (trTitle != null && trTitle != chapter.title) chapter.title else null,
+                                isSelectionMode = isSelectionMode,
+                                isSelected = isSelected,
+                                isLastRead = isLastRead,
+                                isTranslated = isFullyTranslated,
+                                progress = prog,
+                                onToggleSelect = {
+                                    if (isSelected) selectedChapterIds.remove(chapter.id)
+                                    else selectedChapterIds.add(chapter.id)
+                                },
+                                onClick = {
+                                    if (isSelectionMode) {
+                                        if (isSelected) selectedChapterIds.remove(chapter.id)
+                                        else selectedChapterIds.add(chapter.id)
+                                    } else {
+                                        viewModel.setLastReadChapterId(bookId, chapter.id)
+                                        onOpenReader(chapter.id)
+                                    }
+                                },
+                                modifier = Modifier.padding(start = 12.dp)
+                            )
                         }
                     }
-                )
+                }
             }
         }
     }
@@ -692,3 +823,91 @@ fun RangeExportDialog(
         }
     )
 }
+
+data class ChapterGroup(
+    val groupIndex: Int,
+    val startChapterNum: Int,
+    val endChapterNum: Int,
+    val chapters: List<ChapterEntity>
+) {
+    val title: String
+        get() = if (startChapterNum == endChapterNum) "Chapter $startChapterNum" else "Chapter $startChapterNum-$endChapterNum"
+}
+
+@Composable
+fun ChapterGroupHeader(
+    group: ChapterGroup,
+    isExpanded: Boolean,
+    translatedCount: Int,
+    isSelectionMode: Boolean,
+    selectedInGroupCount: Int,
+    onToggleExpand: () -> Unit,
+    onToggleSelectGroup: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    ElevatedCard(
+        onClick = onToggleExpand,
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = if (isExpanded) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f)
+            else MaterialTheme.colorScheme.surface
+        ),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("chapter_group_${group.groupIndex}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            if (isSelectionMode) {
+                Checkbox(
+                    checked = selectedInGroupCount == group.chapters.size && group.chapters.isNotEmpty(),
+                    onCheckedChange = { onToggleSelectGroup() },
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (isExpanded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.FolderOpen else Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = if (isExpanded) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = group.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "${group.chapters.size} chapters • $translatedCount translated",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Icon(
+                imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = if (isExpanded) "Collapse" else "Expand",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+

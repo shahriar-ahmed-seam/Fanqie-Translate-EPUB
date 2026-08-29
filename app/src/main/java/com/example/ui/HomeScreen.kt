@@ -128,19 +128,7 @@ fun HomeScreen(
                     ),
                     shape = RoundedCornerShape(20.dp)
                 ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "Import Chinese EPUB Novels",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Extracts chapters via spine, translates via TomatoMTL, and reconstructs valid English EPUBs.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Row(modifier = Modifier.fillMaxWidth()) {
                             Button(
                                 onClick = { singlePickerLauncher.launch("application/epub+zip") },
@@ -304,7 +292,7 @@ fun BookJobCard(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = book.title,
+                        text = item.displayTitle,
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         maxLines = 2,
@@ -413,7 +401,7 @@ fun BookJobCard(
                 when (job?.status) {
                     "COMPLETED" -> {
                         Button(
-                            onClick = { onExport(book.id, book.title, job.exportedUri) },
+                            onClick = { onExport(book.id, item.displayTitle, job.exportedUri) },
                             enabled = !isExporting,
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                         ) {
