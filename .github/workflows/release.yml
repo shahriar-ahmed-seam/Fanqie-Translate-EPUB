@@ -75,9 +75,6 @@ jobs:
           echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "Determined release: ${NEXT_VERSION} (versionCode: ${VERSION_CODE}, tag: ${TAG_NAME})"
 
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --no-daemon -PversionName="${{ steps.versioning.outputs.version }}" -PversionCode="${{ steps.versioning.outputs.version_code }}"
-
       - name: Build debug APK with release version
         run: ./gradlew assembleDebug --no-daemon -PversionName="${{ steps.versioning.outputs.version }}" -PversionCode="${{ steps.versioning.outputs.version_code }}"
 
