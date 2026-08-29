@@ -1,6 +1,7 @@
 package com.example.data.db
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "books")
@@ -20,7 +21,13 @@ data class BookEntity(
     val targetLanguage: String = "en"
 )
 
-@Entity(tableName = "translation_jobs")
+@Entity(
+    tableName = "translation_jobs",
+    indices = [
+        Index(value = ["status"], name = "index_translation_jobs_status"),
+        Index(value = ["bookId"], name = "index_translation_jobs_bookId")
+    ]
+)
 data class TranslationJobEntity(
     @PrimaryKey
     val id: String, // UUID (jobId)
@@ -37,7 +44,12 @@ data class TranslationJobEntity(
     val exportedFileName: String? = null
 )
 
-@Entity(tableName = "chapters")
+@Entity(
+    tableName = "chapters",
+    indices = [
+        Index(value = ["bookId", "chapterOrder"], name = "index_chapters_bookId_chapterOrder")
+    ]
+)
 data class ChapterEntity(
     @PrimaryKey
     val id: String, // UUID (chapterId)
@@ -48,7 +60,18 @@ data class ChapterEntity(
     val chunkCount: Int = 0
 )
 
-@Entity(tableName = "translation_chunks")
+@Entity(
+    tableName = "translation_chunks",
+    indices = [
+        Index(value = ["jobId"], name = "index_translation_chunks_jobId"),
+        Index(value = ["status"], name = "index_translation_chunks_status"),
+        Index(value = ["jobId", "status"], name = "index_translation_chunks_jobId_status"),
+        Index(value = ["jobId", "chapterId"], name = "index_translation_chunks_jobId_chapterId"),
+        Index(value = ["jobId", "chapterOrder", "chunkOrder"], name = "index_translation_chunks_jobId_chapterOrder_chunkOrder"),
+        Index(value = ["bookId", "chunkType"], name = "index_translation_chunks_bookId_chunkType"),
+        Index(value = ["jobId", "chunkType"], name = "index_translation_chunks_jobId_chunkType")
+    ]
+)
 data class TranslationChunkEntity(
     @PrimaryKey
     val id: String, // UUID (chunkId)

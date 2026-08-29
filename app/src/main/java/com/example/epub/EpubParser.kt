@@ -25,7 +25,7 @@ object EpubParser {
         } ?: throw IllegalArgumentException("Cannot open stream for URI: $uri")
     }
 
-    fun parse(epubFile: File): ParsedEpub {
+    fun parseQuickInfo(epubFile: File): EpubQuickInfo {
         val zip = ZipFile(epubFile)
         try {
             // 1. Locate container.xml
@@ -42,6 +42,7 @@ object EpubParser {
 
             // 2. Parse OPF file
             val opfEntry = zip.getEntry(opfPath)
+                ?: findZipEntry(zip, opfPath)
                 ?: throw IllegalArgumentException("OPF file not found at: $opfPath")
             val opfXml = zip.getInputStream(opfEntry).bufferedReader().use { it.readText() }
             val opfDoc = Jsoup.parse(opfXml, "", Parser.xmlParser())
@@ -107,20 +108,98 @@ object EpubParser {
             val ncxHref = ncxId?.let { manifest[it]?.href }
             val navHref = navId?.let { manifest[it]?.href }
 
-            // 3. Parse Chapters following exact spine order
-            val chapters = mutableListOf<ParsedChapter>()
-            spine.forEachIndexed { index, spineItem ->
-                val fullChapterPath = resolveZipPath(opfDir, spineItem.href)
+            return EpubQuickInfo(
+                metadata = EpubMetadata(
+                    title = title,
+                    author = author,
+                    description = description,
+                    language = language,
+                    coverItemId = coverInfo?.itemId,
+                    coverHref = coverInfo?.href,
+                    coverFullPath = coverInfo?.fullPath,
+                    coverMediaType = coverInfo?.mediaType,
+                    coverProperties = coverInfo?.properties,
+                    legacyMetaCover = coverInfo?.legacyMetaCover
+                ),
+                spine = spine,
+                manifest = manifest,
+                opfPath = opfPath,
+                opfDirectory = opfDir,
+                coverBytes = coverBytes,
+                coverMediaType = coverInfo?.mediaType,
+                ncxHref = ncxHref,
+                navHref = navHref
+            )
+        } finally {
+            zip.close()
+        }
+    }
+
+    /**
+     * Extracts a single chapter's data from an open ZipFile.
+     * Memory for raw XHTML and Jsoup Document is localized to this method call and eligible for immediate GC.
+     */
+    fun extractChapter(
+        zip: ZipFile,
+        opfDir: String,
+        spineItem: SpineItem,
+        chapterOrder: Int
+    ): ParsedChapterData {
+        val fullChapterPath = resolveZipPath(opfDir, spineItem.href)
+        val chapterEntry = findZipEntry(zip, fullChapterPath)
+            ?: throw IllegalStateException("Chapter ${chapterOrder + 1} (${spineItem.href}) could not be found in EPUB archive at '$fullChapterPath'")
+
+        val rawXhtml = try {
+            zip.getInputStream(chapterEntry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (e: Exception) {
+            throw IllegalStateException("Chapter ${chapterOrder + 1} (${spineItem.href}) could not be read from archive: ${e.message}", e)
+        }
+
+        if (rawXhtml.isBlank()) {
+            throw IllegalStateException("Chapter ${chapterOrder + 1} (${spineItem.href}) is empty")
+        }
+
+        // Parse with primary parser, with safe fallback on error
+        val chapterDoc: Document = try {
+            Jsoup.parse(rawXhtml, "", Parser.htmlParser())
+        } catch (e: Exception) {
+            // Safe fallback parser for malformed XHTML
+            try {
+                Jsoup.parse(rawXhtml)
+            } catch (fallbackEx: Exception) {
+                throw IllegalStateException("Chapter ${chapterOrder + 1} (${spineItem.href}) could not be parsed: ${fallbackEx.message}", fallbackEx)
+            }
+        }
+
+        // Extract chapter title
+        val heading = chapterDoc.select("h1, h2, h3, title, .chapter-title, .title, header").firstOrNull { it.text().isNotBlank() }
+        val chapterTitle = heading?.text()?.trim()?.ifBlank { "Chapter ${chapterOrder + 1}" } ?: "Chapter ${chapterOrder + 1}"
+
+        // Extract translatable text blocks
+        val paragraphs = extractTranslatableParagraphs(chapterDoc)
+
+        return ParsedChapterData(
+            chapterId = UUID.randomUUID().toString(),
+            chapterOrder = chapterOrder,
+            href = spineItem.href,
+            title = chapterTitle,
+            translatableParagraphs = paragraphs
+        )
+    }
+
+    fun parse(epubFile: File): ParsedEpub {
+        val quickInfo = parseQuickInfo(epubFile)
+        val zip = ZipFile(epubFile)
+        val chapters = mutableListOf<ParsedChapter>()
+        try {
+            quickInfo.spine.forEachIndexed { index, spineItem ->
+                val fullChapterPath = resolveZipPath(quickInfo.opfDirectory, spineItem.href)
                 val chapterEntry = findZipEntry(zip, fullChapterPath)
                 if (chapterEntry != null) {
                     val rawXhtml = zip.getInputStream(chapterEntry).bufferedReader(Charsets.UTF_8).use { it.readText() }
                     val chapterDoc = Jsoup.parse(rawXhtml, "", Parser.htmlParser())
-
-                    // Extract chapter title
                     val heading = chapterDoc.select("h1, h2, h3, title, .chapter-title, .title").firstOrNull { it.text().isNotBlank() }
                     val chapterTitle = heading?.text() ?: "Chapter ${index + 1}"
-
-                    // Extract translatable text blocks
                     val paragraphs = extractTranslatableParagraphs(chapterDoc)
 
                     chapters.add(
@@ -136,29 +215,17 @@ object EpubParser {
                     )
                 }
             }
-
             return ParsedEpub(
                 originalFile = epubFile,
-                opfPath = opfPath,
-                opfDirectory = opfDir,
-                metadata = EpubMetadata(
-                    title = title,
-                    author = author,
-                    description = description,
-                    language = language,
-                    coverItemId = coverInfo?.itemId,
-                    coverHref = coverInfo?.href,
-                    coverFullPath = coverInfo?.fullPath,
-                    coverMediaType = coverInfo?.mediaType,
-                    coverProperties = coverInfo?.properties,
-                    legacyMetaCover = coverInfo?.legacyMetaCover
-                ),
-                manifest = manifest,
-                spine = spine,
-                ncxHref = ncxHref,
-                navHref = navHref,
-                coverBytes = coverBytes,
-                coverMediaType = coverInfo?.mediaType,
+                opfPath = quickInfo.opfPath,
+                opfDirectory = quickInfo.opfDirectory,
+                metadata = quickInfo.metadata,
+                manifest = quickInfo.manifest,
+                spine = quickInfo.spine,
+                ncxHref = quickInfo.ncxHref,
+                navHref = quickInfo.navHref,
+                coverBytes = quickInfo.coverBytes,
+                coverMediaType = quickInfo.coverMediaType,
                 chapters = chapters
             )
         } finally {

@@ -86,7 +86,7 @@ fun BookPreviewDialog(
 
                 // Title
                 Text(
-                    text = previewState.parsedEpub.metadata.title,
+                    text = previewState.title,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.testTag("preview_book_title")
@@ -94,7 +94,7 @@ fun BookPreviewDialog(
 
                 // Author
                 Text(
-                    text = "Author: ${previewState.parsedEpub.metadata.author}",
+                    text = "Author: ${previewState.author}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -108,7 +108,7 @@ fun BookPreviewDialog(
                 ) {
                     SuggestionChip(
                         onClick = {},
-                        label = { Text("${previewState.parsedEpub.chapters.size} Chapters") }
+                        label = { Text("${previewState.chapterCount} Chapters") }
                     )
                     SuggestionChip(
                         onClick = {},
@@ -117,10 +117,10 @@ fun BookPreviewDialog(
                 }
 
                 // Description
-                if (previewState.parsedEpub.metadata.description.isNotBlank()) {
+                if (previewState.description.isNotBlank()) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = previewState.parsedEpub.metadata.description,
+                        text = previewState.description,
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 4,
                         overflow = TextOverflow.Ellipsis,

@@ -28,6 +28,26 @@ data class SpineItem(
     val href: String
 )
 
+data class EpubQuickInfo(
+    val metadata: EpubMetadata,
+    val spine: List<SpineItem>,
+    val manifest: Map<String, ManifestItem>,
+    val opfPath: String,
+    val opfDirectory: String,
+    val coverBytes: ByteArray?,
+    val coverMediaType: String?,
+    val ncxHref: String?,
+    val navHref: String?
+)
+
+data class ParsedChapterData(
+    val chapterId: String,
+    val chapterOrder: Int,
+    val href: String,
+    val title: String,
+    val translatableParagraphs: List<String>
+)
+
 data class ParsedChapter(
     val chapterId: String,
     val chapterOrder: Int,

@@ -4,14 +4,12 @@ import java.util.UUID
 
 object EpubChunker {
 
-    fun generateChunks(
-        parsedEpub: ParsedEpub,
-        maxChunkSize: Int = 4200
+    fun generateChunksForMetadata(
+        title: String,
+        description: String
     ): List<ChunkDefinition> {
         val chunks = mutableListOf<ChunkDefinition>()
-
-        // 1. Metadata Chunks (Chapter Order = -1)
-        if (parsedEpub.metadata.title.isNotBlank()) {
+        if (title.isNotBlank()) {
             chunks.add(
                 ChunkDefinition(
                     chapterId = "METADATA_TITLE",
@@ -19,12 +17,12 @@ object EpubChunker {
                     chunkId = UUID.randomUUID().toString(),
                     chunkOrder = 0,
                     chunkType = "TITLE",
-                    text = parsedEpub.metadata.title
+                    text = title
                 )
             )
         }
 
-        if (parsedEpub.metadata.description.isNotBlank()) {
+        if (description.isNotBlank()) {
             chunks.add(
                 ChunkDefinition(
                     chapterId = "METADATA_DESCRIPTION",
@@ -32,78 +30,103 @@ object EpubChunker {
                     chunkId = UUID.randomUUID().toString(),
                     chunkOrder = 1,
                     chunkType = "DESCRIPTION",
-                    text = parsedEpub.metadata.description
+                    text = description
+                )
+            )
+        }
+        return chunks
+    }
+
+    fun generateChunksForChapter(
+        chapterId: String,
+        chapterOrder: Int,
+        chapterTitle: String,
+        paragraphs: List<String>,
+        maxChunkSize: Int = 4200
+    ): List<ChunkDefinition> {
+        val chunks = mutableListOf<ChunkDefinition>()
+        var chunkIndex = 0
+
+        // Chapter Title Chunk
+        if (chapterTitle.isNotBlank()) {
+            chunks.add(
+                ChunkDefinition(
+                    chapterId = chapterId,
+                    chapterOrder = chapterOrder,
+                    chunkId = UUID.randomUUID().toString(),
+                    chunkOrder = chunkIndex++,
+                    chunkType = "CHAPTER_TITLE",
+                    text = chapterTitle
                 )
             )
         }
 
-        // 2. Chapters Chunks
-        for (chapter in parsedEpub.chapters) {
-            var chunkIndex = 0
+        // Chapter Body Paragraph Chunks
+        var currentParagraphs = mutableListOf<String>()
+        var currentLength = 0
+        var paragraphStartIdx = 0
 
-            // Chapter Title Chunk
-            if (chapter.title.isNotBlank()) {
+        for (i in paragraphs.indices) {
+            val p = paragraphs[i]
+            val pLength = p.length + 2 // accounting for "\n\n"
+
+            if (currentLength + pLength > maxChunkSize && currentParagraphs.isNotEmpty()) {
                 chunks.add(
                     ChunkDefinition(
-                        chapterId = chapter.chapterId,
-                        chapterOrder = chapter.chapterOrder,
-                        chunkId = UUID.randomUUID().toString(),
-                        chunkOrder = chunkIndex++,
-                        chunkType = "CHAPTER_TITLE",
-                        text = chapter.title
-                    )
-                )
-            }
-
-            // Chapter Body Paragraph Chunks
-            val paragraphs = chapter.translatableParagraphs
-            var currentParagraphs = mutableListOf<String>()
-            var currentLength = 0
-            var paragraphStartIdx = 0
-
-            for (i in paragraphs.indices) {
-                val p = paragraphs[i]
-                val pLength = p.length + 2 // accounting for "\n\n"
-
-                if (currentLength + pLength > maxChunkSize && currentParagraphs.isNotEmpty()) {
-                    // Flush current chunk
-                    chunks.add(
-                        ChunkDefinition(
-                            chapterId = chapter.chapterId,
-                            chapterOrder = chapter.chapterOrder,
-                            chunkId = UUID.randomUUID().toString(),
-                            chunkOrder = chunkIndex++,
-                            chunkType = "CHAPTER_BODY",
-                            text = currentParagraphs.joinToString("\n\n"),
-                            paragraphStartIdx = paragraphStartIdx,
-                            paragraphEndIdx = i - 1
-                        )
-                    )
-                    currentParagraphs = mutableListOf()
-                    currentLength = 0
-                    paragraphStartIdx = i
-                }
-
-                currentParagraphs.add(p)
-                currentLength += pLength
-            }
-
-            if (currentParagraphs.isNotEmpty()) {
-                chunks.add(
-                    ChunkDefinition(
-                        chapterId = chapter.chapterId,
-                        chapterOrder = chapter.chapterOrder,
+                        chapterId = chapterId,
+                        chapterOrder = chapterOrder,
                         chunkId = UUID.randomUUID().toString(),
                         chunkOrder = chunkIndex++,
                         chunkType = "CHAPTER_BODY",
                         text = currentParagraphs.joinToString("\n\n"),
                         paragraphStartIdx = paragraphStartIdx,
-                        paragraphEndIdx = paragraphs.size - 1
+                        paragraphEndIdx = i - 1
                     )
                 )
+                currentParagraphs = mutableListOf()
+                currentLength = 0
+                paragraphStartIdx = i
             }
+
+            currentParagraphs.add(p)
+            currentLength += pLength
         }
 
+        if (currentParagraphs.isNotEmpty()) {
+            chunks.add(
+                ChunkDefinition(
+                    chapterId = chapterId,
+                    chapterOrder = chapterOrder,
+                    chunkId = UUID.randomUUID().toString(),
+                    chunkOrder = chunkIndex++,
+                    chunkType = "CHAPTER_BODY",
+                    text = currentParagraphs.joinToString("\n\n"),
+                    paragraphStartIdx = paragraphStartIdx,
+                    paragraphEndIdx = paragraphs.size - 1
+                )
+            )
+        }
+
+        return chunks
+    }
+
+    fun generateChunks(
+        parsedEpub: ParsedEpub,
+        maxChunkSize: Int = 4200
+    ): List<ChunkDefinition> {
+        val chunks = mutableListOf<ChunkDefinition>()
+        chunks.addAll(generateChunksForMetadata(parsedEpub.metadata.title, parsedEpub.metadata.description))
+        for (chapter in parsedEpub.chapters) {
+            chunks.addAll(
+                generateChunksForChapter(
+                    chapterId = chapter.chapterId,
+                    chapterOrder = chapter.chapterOrder,
+                    chapterTitle = chapter.title,
+                    paragraphs = chapter.translatableParagraphs,
+                    maxChunkSize = maxChunkSize
+                )
+            )
+        }
         return chunks
     }
 }

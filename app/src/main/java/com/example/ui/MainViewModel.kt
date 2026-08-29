@@ -13,7 +13,7 @@ import com.example.data.db.TranslationJobEntity
 import com.example.data.repository.AppSettings
 import com.example.data.repository.SettingsRepository
 import com.example.epub.EpubParser
-import com.example.epub.ParsedEpub
+import com.example.queue.ImportProgress
 import com.example.queue.TranslationQueueManager
 import com.example.update.AppUpdateManager
 import com.example.update.ReleaseInfo
@@ -32,7 +32,10 @@ data class BookWithJob(
 data class BookPreviewState(
     val uri: Uri,
     val fileName: String,
-    val parsedEpub: ParsedEpub,
+    val title: String,
+    val author: String,
+    val description: String,
+    val chapterCount: Int,
     val tempCoverFile: File?
 )
 
@@ -61,6 +64,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val activeWorkers: StateFlow<Int> = queueManager.activeWorkers
     val isProcessing: StateFlow<Boolean> = queueManager.isProcessing
+    val importProgress: StateFlow<ImportProgress?> = queueManager.importProgress
 
     private val _previewState = MutableStateFlow<BookPreviewState?>(null)
     val previewState: StateFlow<BookPreviewState?> = _previewState.asStateFlow()
@@ -94,16 +98,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val fileName = getFileNameFromUri(getApplication(), uri)
                 val tempFile = File(getApplication<Application>().cacheDir, "preview_${System.currentTimeMillis()}.epub")
-                EpubParser.copyUriToTempFile(getApplication(), uri, tempFile)
-                val parsed = EpubParser.parse(tempFile)
+                try {
+                    EpubParser.copyUriToTempFile(getApplication(), uri, tempFile)
+                    val quickInfo = EpubParser.parseQuickInfo(tempFile)
 
-                var coverFile: File? = null
-                if (parsed.coverBytes != null && parsed.coverBytes.isNotEmpty()) {
-                    coverFile = File(getApplication<Application>().cacheDir, "preview_cover_${System.currentTimeMillis()}.png")
-                    coverFile.writeBytes(parsed.coverBytes)
+                    var coverFile: File? = null
+                    if (quickInfo.coverBytes != null && quickInfo.coverBytes.isNotEmpty()) {
+                        val ext = if (quickInfo.coverMediaType?.contains("png") == true) "png" else "jpg"
+                        coverFile = File(getApplication<Application>().cacheDir, "preview_cover_${System.currentTimeMillis()}.$ext")
+                        coverFile.writeBytes(quickInfo.coverBytes)
+                    }
+
+                    _previewState.value = BookPreviewState(
+                        uri = uri,
+                        fileName = fileName,
+                        title = quickInfo.metadata.title,
+                        author = quickInfo.metadata.author,
+                        description = quickInfo.metadata.description,
+                        chapterCount = quickInfo.spine.size,
+                        tempCoverFile = coverFile
+                    )
+                } finally {
+                    if (tempFile.exists()) {
+                        tempFile.delete()
+                    }
                 }
-
-                _previewState.value = BookPreviewState(uri, fileName, parsed, coverFile)
             } catch (e: Exception) {
                 _message.value = "Failed to parse EPUB: ${e.message}"
             }
@@ -114,10 +133,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _previewState.value ?: return
         viewModelScope.launch {
             try {
-                queueManager.enqueueEpub(state.uri, state.fileName)
                 closePreview()
+                queueManager.enqueueEpub(state.uri, state.fileName)
                 com.example.service.TranslationService.start(getApplication())
-                _message.value = "Added '${state.parsedEpub.metadata.title}' to translation queue"
+                _message.value = "Added '${state.title}' to translation queue"
             } catch (e: Exception) {
                 _message.value = "Failed to queue book: ${e.message}"
             }

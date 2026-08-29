@@ -3,6 +3,7 @@ package com.example.queue
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import androidx.room.withTransaction
 import com.example.data.db.*
 import com.example.data.repository.AppSettings
 import com.example.data.repository.SettingsRepository
@@ -16,6 +17,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.ZipFile
+
+data class ImportProgress(
+    val bookTitle: String,
+    val currentChapter: Int,
+    val totalChapters: Int,
+    val chunksCreated: Int
+)
 
 class TranslationQueueManager(
     private val context: Context,
@@ -35,6 +44,9 @@ class TranslationQueueManager(
 
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing.asStateFlow()
+
+    private val _importProgress = MutableStateFlow<ImportProgress?>(null)
+    val importProgress: StateFlow<ImportProgress?> = _importProgress.asStateFlow()
 
     private var coordinatorJob: Job? = null
     private val workerJobs = mutableListOf<Job>()
@@ -309,92 +321,236 @@ class TranslationQueueManager(
 
     /**
      * Adds an EPUB book to the system and queues it for translation.
+     * Streams chapters one-by-one with batched Room database insertions.
+     * Memory usage is O(1) with respect to chapter count (supports 2,600+ chapters).
      */
-    suspend fun enqueueEpub(uri: Uri, fileName: String): Pair<BookEntity, TranslationJobEntity> = withContext(Dispatchers.IO) {
+    suspend fun enqueueEpub(
+        uri: Uri,
+        fileName: String,
+        onProgress: ((currentChapter: Int, totalChapters: Int, chunksCreated: Int) -> Unit)? = null
+    ): Pair<BookEntity, TranslationJobEntity> = withContext(Dispatchers.IO) {
         val bookId = UUID.randomUUID().toString()
         val jobId = UUID.randomUUID().toString()
-
-        // 1. Copy source EPUB to app private cache directory
         val bookDir = File(context.filesDir, "books/$bookId").apply { mkdirs() }
         val sourceEpubFile = File(bookDir, "source.epub")
-        EpubParser.copyUriToTempFile(context, uri, sourceEpubFile)
 
-        // 2. Parse EPUB
-        val parsedEpub = EpubParser.parse(sourceEpubFile)
+        try {
+            // 1. Copy source EPUB to app private directory
+            EpubParser.copyUriToTempFile(context, uri, sourceEpubFile)
 
-        // Save cover image if available
-        var coverPath: String? = null
-        if (parsedEpub.coverBytes != null && parsedEpub.coverBytes.isNotEmpty()) {
-            val ext = if (parsedEpub.coverMediaType?.contains("png") == true) "png" else "jpg"
-            val coverFile = File(bookDir, "cover.$ext")
-            coverFile.writeBytes(parsedEpub.coverBytes)
-            coverPath = coverFile.absolutePath
-        }
+            // 2. Parse EPUB metadata, manifest, and spine dynamically (O(1) chapter memory)
+            val quickInfo = EpubParser.parseQuickInfo(sourceEpubFile)
 
-        // 3. Generate Chunks
-        val settings = settingsRepository.settings.value
-        val chunkDefs = EpubChunker.generateChunks(parsedEpub, settings.chunkSize)
+            // Save cover image if available
+            var coverPath: String? = null
+            if (quickInfo.coverBytes != null && quickInfo.coverBytes.isNotEmpty()) {
+                val ext = if (quickInfo.coverMediaType?.contains("png") == true) "png" else "jpg"
+                val coverFile = File(bookDir, "cover.$ext")
+                coverFile.writeBytes(quickInfo.coverBytes)
+                coverPath = coverFile.absolutePath
+            }
 
-        // 4. Save Book Entity
-        val bookEntity = BookEntity(
-            id = bookId,
-            title = parsedEpub.metadata.title,
-            author = parsedEpub.metadata.author,
-            description = parsedEpub.metadata.description,
-            coverPath = coverPath,
-            originalUri = uri.toString(),
-            originalFileName = fileName,
-            chapterCount = parsedEpub.chapters.size,
-            totalChunks = chunkDefs.size,
-            createdAt = System.currentTimeMillis()
-        )
-        database.bookDao().insertBook(bookEntity)
+            val settings = settingsRepository.settings.value
+            val totalChapters = quickInfo.spine.size
 
-        // 5. Save Chapter Entities
-        val chapterEntities = parsedEpub.chapters.map { ch ->
-            ChapterEntity(
-                id = ch.chapterId,
-                bookId = bookId,
-                chapterOrder = ch.chapterOrder,
-                originalHref = ch.href,
-                title = ch.title,
-                chunkCount = chunkDefs.count { it.chapterId == ch.chapterId }
+            // 3. Generate Metadata Chunks (Title & Description)
+            val metadataChunks = EpubChunker.generateChunksForMetadata(
+                title = quickInfo.metadata.title,
+                description = quickInfo.metadata.description
             )
-        }
-        database.chapterDao().insertChapters(chapterEntities)
 
-        // 6. Save Translation Chunks
-        val chunkEntities = chunkDefs.map { def ->
-            TranslationChunkEntity(
-                id = def.chunkId,
-                jobId = jobId,
-                bookId = bookId,
-                chapterId = def.chapterId,
-                chapterOrder = def.chapterOrder,
-                chunkOrder = def.chunkOrder,
-                chunkType = def.chunkType,
-                sourceText = def.text,
-                status = "PENDING"
+            // 4. Prepare streaming buffers
+            val chapterBatch = mutableListOf<ChapterEntity>()
+            val chunkBatch = mutableListOf<TranslationChunkEntity>()
+            var totalChunksCreated = metadataChunks.size
+
+            // Add metadata chunks to batch
+            metadataChunks.forEach { def ->
+                chunkBatch.add(
+                    TranslationChunkEntity(
+                        id = def.chunkId,
+                        jobId = jobId,
+                        bookId = bookId,
+                        chapterId = def.chapterId,
+                        chapterOrder = def.chapterOrder,
+                        chunkOrder = def.chunkOrder,
+                        chunkType = def.chunkType,
+                        sourceText = def.text,
+                        status = "PENDING"
+                    )
+                )
+            }
+
+            _importProgress.value = ImportProgress(
+                bookTitle = quickInfo.metadata.title,
+                currentChapter = 0,
+                totalChapters = totalChapters,
+                chunksCreated = totalChunksCreated
             )
+            onProgress?.invoke(0, totalChapters, totalChunksCreated)
+
+            // 5. Stream chapters one-by-one from the EPUB ZipFile
+            val zip = ZipFile(sourceEpubFile)
+            try {
+                for (index in quickInfo.spine.indices) {
+                    val spineItem = quickInfo.spine[index]
+                    val chapterData = try {
+                        EpubParser.extractChapter(zip, quickInfo.opfDirectory, spineItem, index)
+                    } catch (e: Exception) {
+                        Log.e("QueueManager", "Failed to parse chapter ${index + 1} (${spineItem.href}): ${e.message}", e)
+                        throw IllegalStateException("Failed to parse chapter ${index + 1} (${spineItem.href}): ${e.message}", e)
+                    }
+
+                    val chapterChunks = EpubChunker.generateChunksForChapter(
+                        chapterId = chapterData.chapterId,
+                        chapterOrder = index,
+                        chapterTitle = chapterData.title,
+                        paragraphs = chapterData.translatableParagraphs,
+                        maxChunkSize = settings.chunkSize
+                    )
+
+                    val chunkCount = chapterChunks.size
+                    totalChunksCreated += chunkCount
+
+                    chapterBatch.add(
+                        ChapterEntity(
+                            id = chapterData.chapterId,
+                            bookId = bookId,
+                            chapterOrder = index,
+                            originalHref = spineItem.href,
+                            title = chapterData.title,
+                            chunkCount = chunkCount
+                        )
+                    )
+
+                    chapterChunks.forEach { def ->
+                        chunkBatch.add(
+                            TranslationChunkEntity(
+                                id = def.chunkId,
+                                jobId = jobId,
+                                bookId = bookId,
+                                chapterId = def.chapterId,
+                                chapterOrder = def.chapterOrder,
+                                chunkOrder = def.chunkOrder,
+                                chunkType = def.chunkType,
+                                sourceText = def.text,
+                                status = "PENDING"
+                            )
+                        )
+                    }
+
+                    // Flush batches when threshold reached (100 chapters or 300 chunks)
+                    if (chunkBatch.size >= 300 || chapterBatch.size >= 100) {
+                        val chList = ArrayList(chapterBatch)
+                        val ckList = ArrayList(chunkBatch)
+                        chapterBatch.clear()
+                        chunkBatch.clear()
+                        database.withTransaction {
+                            if (chList.isNotEmpty()) database.chapterDao().insertChapters(chList)
+                            if (ckList.isNotEmpty()) database.chunkDao().insertChunks(ckList)
+                        }
+                    }
+
+                    val currentChapter = index + 1
+                    _importProgress.value = ImportProgress(
+                        bookTitle = quickInfo.metadata.title,
+                        currentChapter = currentChapter,
+                        totalChapters = totalChapters,
+                        chunksCreated = totalChunksCreated
+                    )
+                    onProgress?.invoke(currentChapter, totalChapters, totalChunksCreated)
+                }
+
+                // Flush any remaining chapters/chunks in batch
+                if (chapterBatch.isNotEmpty() || chunkBatch.isNotEmpty()) {
+                    val chList = ArrayList(chapterBatch)
+                    val ckList = ArrayList(chunkBatch)
+                    chapterBatch.clear()
+                    chunkBatch.clear()
+                    database.withTransaction {
+                        if (chList.isNotEmpty()) database.chapterDao().insertChapters(chList)
+                        if (ckList.isNotEmpty()) database.chunkDao().insertChunks(ckList)
+                    }
+                }
+            } finally {
+                zip.close()
+            }
+
+            // 6. Strict Import Consistency Verification
+            val savedChapters = database.chapterDao().getChaptersByBook(bookId)
+            if (savedChapters.size != totalChapters) {
+                cleanupFailedImport(bookId, jobId, bookDir)
+                throw IllegalStateException("Import verification failed: Expected $totalChapters spine chapters, but found ${savedChapters.size} in database.")
+            }
+
+            savedChapters.forEachIndexed { i, ch ->
+                if (ch.chapterOrder != i) {
+                    cleanupFailedImport(bookId, jobId, bookDir)
+                    throw IllegalStateException("Import verification failed: Chapter order mismatch at index $i (found ${ch.chapterOrder}).")
+                }
+            }
+
+            val persistedChunks = database.chunkDao().getTotalChunkCount(jobId)
+            if (persistedChunks != totalChunksCreated) {
+                cleanupFailedImport(bookId, jobId, bookDir)
+                throw IllegalStateException("Import verification failed: Chunk count mismatch (persisted: $persistedChunks, expected: $totalChunksCreated).")
+            }
+
+            // 7. Save Book and Initial Job Entity
+            val bookEntity = BookEntity(
+                id = bookId,
+                title = quickInfo.metadata.title,
+                author = quickInfo.metadata.author,
+                description = quickInfo.metadata.description,
+                coverPath = coverPath,
+                originalUri = uri.toString(),
+                originalFileName = fileName,
+                chapterCount = totalChapters,
+                totalChunks = totalChunksCreated,
+                createdAt = System.currentTimeMillis()
+            )
+
+            val jobEntity = TranslationJobEntity(
+                id = jobId,
+                bookId = bookId,
+                status = "QUEUED",
+                progress = 0f,
+                completedChunks = 0,
+                failedChunks = 0,
+                totalChunks = totalChunksCreated,
+                startedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis()
+            )
+
+            database.withTransaction {
+                database.bookDao().insertBook(bookEntity)
+                database.jobDao().insertJob(jobEntity)
+            }
+
+            _importProgress.value = null
+            startQueueProcessing()
+            Log.i("QueueManager", "Successfully imported '$fileName' ($totalChapters chapters, $totalChunksCreated chunks).")
+            return@withContext Pair(bookEntity, jobEntity)
+        } catch (e: Exception) {
+            _importProgress.value = null
+            cleanupFailedImport(bookId, jobId, bookDir)
+            Log.e("QueueManager", "EPUB import failed for '$fileName': ${e.message}", e)
+            throw e
         }
-        database.chunkDao().insertChunks(chunkEntities)
+    }
 
-        // 7. Save Translation Job with initial QUEUED status
-        val jobEntity = TranslationJobEntity(
-            id = jobId,
-            bookId = bookId,
-            status = "QUEUED",
-            progress = 0f,
-            completedChunks = 0,
-            failedChunks = 0,
-            totalChunks = chunkDefs.size,
-            startedAt = System.currentTimeMillis(),
-            updatedAt = System.currentTimeMillis()
-        )
-        database.jobDao().insertJob(jobEntity)
-
-        startQueueProcessing()
-        return@withContext Pair(bookEntity, jobEntity)
+    private suspend fun cleanupFailedImport(bookId: String, jobId: String, bookDir: File) {
+        try {
+            database.chunkDao().deleteChunksByJob(jobId)
+            database.chapterDao().deleteChaptersByBook(bookId)
+            database.jobDao().deleteJobById(jobId)
+            database.bookDao().deleteBookById(bookId)
+            if (bookDir.exists()) {
+                bookDir.deleteRecursively()
+            }
+        } catch (cleanupEx: Exception) {
+            Log.w("QueueManager", "Failed to clean up partial import records: ${cleanupEx.message}")
+        }
     }
 
     private suspend fun updateJobProgress(jobId: String) {

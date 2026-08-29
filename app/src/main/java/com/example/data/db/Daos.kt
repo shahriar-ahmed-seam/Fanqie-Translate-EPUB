@@ -81,6 +81,11 @@ interface ChapterDao {
     suspend fun deleteChaptersByBook(bookId: String)
 }
 
+data class ChapterTitleTuple(
+    val chapterId: String,
+    val translatedText: String?
+)
+
 data class ChapterProgressTuple(
     val chapterId: String,
     val totalChunks: Int,
@@ -94,6 +99,12 @@ interface TranslationChunkDao {
 
     @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND chapterId = :chapterId ORDER BY chunkOrder ASC")
     suspend fun getChunksByJobAndChapter(jobId: String, chapterId: String): List<TranslationChunkEntity>
+
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND chapterOrder >= :fromChapterOrder AND chapterOrder <= :toChapterOrder ORDER BY chapterOrder ASC, chunkOrder ASC")
+    suspend fun getChunksByJobAndChapterRange(jobId: String, fromChapterOrder: Int, toChapterOrder: Int): List<TranslationChunkEntity>
+
+    @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chapterOrder >= :fromChapterOrder AND chapterOrder <= :toChapterOrder ORDER BY chapterOrder ASC, chunkOrder ASC")
+    suspend fun getChunksByBookAndChapterRange(bookId: String, fromChapterOrder: Int, toChapterOrder: Int): List<TranslationChunkEntity>
 
     @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND chunkType = 'CHAPTER_TITLE'")
     suspend fun getChapterTitleChunks(jobId: String): List<TranslationChunkEntity>
@@ -112,6 +123,12 @@ interface TranslationChunkDao {
 
     @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chapterId = :chapterId ORDER BY chunkOrder ASC")
     suspend fun getChunksByChapter(bookId: String, chapterId: String): List<TranslationChunkEntity>
+
+    @Query("SELECT chapterId, translatedText FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'CHAPTER_TITLE'")
+    suspend fun getChapterTitlesByBook(bookId: String): List<ChapterTitleTuple>
+
+    @Query("SELECT chapterId, translatedText FROM translation_chunks WHERE jobId = :jobId AND chunkType = 'CHAPTER_TITLE'")
+    suspend fun getChapterTitlesByJob(jobId: String): List<ChapterTitleTuple>
 
     @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'CHAPTER_TITLE'")
     suspend fun getChapterTitleChunksByBook(bookId: String): List<TranslationChunkEntity>

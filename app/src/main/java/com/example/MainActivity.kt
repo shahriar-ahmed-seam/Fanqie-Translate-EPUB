@@ -9,8 +9,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.ListAlt
@@ -18,9 +18,14 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.queue.ImportProgress
 import com.example.ui.*
 import com.example.ui.theme.MyApplicationTheme
 import java.io.File
@@ -73,6 +78,7 @@ fun MainApp(viewModel: MainViewModel) {
     val previewState by viewModel.previewState.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val updateProgress by viewModel.updateProgress.collectAsStateWithLifecycle()
+    val importProgress by viewModel.importProgress.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
     // Show Snackbars for messages
@@ -226,4 +232,67 @@ fun MainApp(viewModel: MainViewModel) {
             onDownload = { downloadUrl -> viewModel.startApkDownload(downloadUrl) }
         )
     }
+
+    // Streaming Import Progress Dialog
+    importProgress?.let { progress ->
+        ImportProgressDialog(progress = progress)
+    }
+}
+
+@Composable
+fun ImportProgressDialog(progress: ImportProgress) {
+    AlertDialog(
+        onDismissRequest = { /* Non-dismissible while streaming import to maintain consistency */ },
+        confirmButton = {},
+        title = {
+            Text(
+                text = "Importing Novel",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) {
+                Text(
+                    text = progress.bookTitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                val fraction = if (progress.totalChapters > 0) {
+                    (progress.currentChapter.toFloat() / progress.totalChapters.toFloat()).coerceIn(0f, 1f)
+                } else 0f
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Chapter ${progress.currentChapter} / ${progress.totalChapters}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "${progress.chunksCreated} chunks",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    )
 }

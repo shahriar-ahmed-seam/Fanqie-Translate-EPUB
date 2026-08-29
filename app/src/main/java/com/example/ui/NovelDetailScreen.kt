@@ -78,7 +78,7 @@ fun NovelDetailScreen(
             val descChunk = db.chunkDao().getDescriptionChunkByBook(bookId)
             translatedDescription = descChunk?.translatedText?.takeIf { it.isNotBlank() }
 
-            val titleChunks = db.chunkDao().getChapterTitleChunksByBook(bookId)
+            val titleChunks = db.chunkDao().getChapterTitlesByBook(bookId)
             chapterTitlesMap = titleChunks.associate { it.chapterId to (it.translatedText ?: "") }
 
             val progressList = db.chunkDao().getChapterBodyProgressByBook(bookId)
