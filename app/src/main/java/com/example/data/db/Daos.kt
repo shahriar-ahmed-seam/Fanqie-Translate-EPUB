@@ -35,7 +35,7 @@ interface TranslationJobDao {
     @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'RUNNING', 'TRANSLATING') ORDER BY startedAt ASC")
     suspend fun getActiveJobs(): List<TranslationJobEntity>
 
-    @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'RUNNING', 'TRANSLATING') ORDER BY startedAt ASC")
+    @Query("SELECT * FROM translation_jobs WHERE status IN ('QUEUED', 'RUNNING', 'TRANSLATING', 'PAUSING') ORDER BY startedAt ASC")
     fun observeActiveJobs(): Flow<List<TranslationJobEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -46,6 +46,9 @@ interface TranslationJobDao {
 
     @Query("UPDATE translation_jobs SET status = :status, updatedAt = :timestamp WHERE id = :jobId")
     suspend fun updateJobStatus(jobId: String, status: String, timestamp: Long = System.currentTimeMillis())
+
+    @Query("UPDATE translation_jobs SET status = 'PAUSED', updatedAt = :timestamp WHERE status = 'PAUSING'")
+    suspend fun resetPausingJobsToPaused(timestamp: Long = System.currentTimeMillis())
 
     @Query("UPDATE translation_jobs SET status = 'QUEUED', updatedAt = :timestamp WHERE status IN ('RUNNING', 'TRANSLATING')")
     suspend fun resetRunningJobsToQueued(timestamp: Long = System.currentTimeMillis())
@@ -65,12 +68,24 @@ interface ChapterDao {
     @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY chapterOrder ASC")
     suspend fun getChaptersByBook(bookId: String): List<ChapterEntity>
 
+    @Query("SELECT * FROM chapters WHERE id = :id LIMIT 1")
+    suspend fun getChapterById(id: String): ChapterEntity?
+
+    @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY chapterOrder ASC")
+    fun observeChaptersByBook(bookId: String): Flow<List<ChapterEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChapters(chapters: List<ChapterEntity>)
 
     @Query("DELETE FROM chapters WHERE bookId = :bookId")
     suspend fun deleteChaptersByBook(bookId: String)
 }
+
+data class ChapterProgressTuple(
+    val chapterId: String,
+    val totalChunks: Int,
+    val completedChunks: Int
+)
 
 @Dao
 interface TranslationChunkDao {
@@ -97,6 +112,21 @@ interface TranslationChunkDao {
 
     @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chapterId = :chapterId ORDER BY chunkOrder ASC")
     suspend fun getChunksByChapter(bookId: String, chapterId: String): List<TranslationChunkEntity>
+
+    @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'CHAPTER_TITLE'")
+    suspend fun getChapterTitleChunksByBook(bookId: String): List<TranslationChunkEntity>
+
+    @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'TITLE' LIMIT 1")
+    suspend fun getTitleChunkByBook(bookId: String): TranslationChunkEntity?
+
+    @Query("SELECT * FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'DESCRIPTION' LIMIT 1")
+    suspend fun getDescriptionChunkByBook(bookId: String): TranslationChunkEntity?
+
+    @Query("SELECT chapterId, COUNT(*) as totalChunks, SUM(CASE WHEN (status = 'COMPLETED' OR (translatedText IS NOT NULL AND translatedText != '')) THEN 1 ELSE 0 END) as completedChunks FROM translation_chunks WHERE bookId = :bookId AND chunkType = 'CHAPTER_BODY' GROUP BY chapterId")
+    suspend fun getChapterBodyProgressByBook(bookId: String): List<ChapterProgressTuple>
+
+    @Query("SELECT chapterId, COUNT(*) as totalChunks, SUM(CASE WHEN (status = 'COMPLETED' OR (translatedText IS NOT NULL AND translatedText != '')) THEN 1 ELSE 0 END) as completedChunks FROM translation_chunks WHERE jobId = :jobId AND chunkType = 'CHAPTER_BODY' GROUP BY chapterId")
+    suspend fun getChapterBodyProgressByJob(jobId: String): List<ChapterProgressTuple>
 
     @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND status = 'PENDING' ORDER BY chapterOrder ASC, chunkOrder ASC LIMIT :limit")
     suspend fun getPendingChunksForJob(jobId: String, limit: Int): List<TranslationChunkEntity>

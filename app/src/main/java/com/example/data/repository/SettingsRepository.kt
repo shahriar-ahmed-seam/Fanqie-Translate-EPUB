@@ -54,4 +54,12 @@ class SettingsRepository(context: Context) {
         }
         _settings.value = newSettings
     }
+
+    fun getLastReadChapterId(bookId: String): String? {
+        return prefs.getString("last_read_chapter_$bookId", null)
+    }
+
+    fun setLastReadChapterId(bookId: String, chapterId: String) {
+        prefs.edit().putString("last_read_chapter_$bookId", chapterId).apply()
+    }
 }

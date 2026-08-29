@@ -29,6 +29,10 @@ class TranslationQueueManager(
     private val _activeWorkers = MutableStateFlow(0)
     val activeWorkers: StateFlow<Int> = _activeWorkers.asStateFlow()
 
+    private val inFlightByJob = java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>()
+    private val _activeWorkersByJob = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val activeWorkersByJob: StateFlow<Map<String, Int>> = _activeWorkersByJob.asStateFlow()
+
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing.asStateFlow()
 
@@ -42,19 +46,27 @@ class TranslationQueueManager(
         // Startup recovery:
         // 1. Any TRANSLATING chunks with valid translatedText become COMPLETED.
         // 2. Any TRANSLATING chunks without completed results reset to PENDING.
-        // 3. Any RUNNING jobs become QUEUED.
-        // 4. Jobs intentionally PAUSED remain PAUSED in the database.
-        // 5. Start queue coordinator to pick up QUEUED jobs immediately.
+        // 3. Any PAUSING jobs become PAUSED (since 0 requests are in-flight on cold start).
+        // 4. Any RUNNING jobs become QUEUED.
+        // 5. Jobs intentionally PAUSED remain PAUSED in the database.
+        // 6. Start queue coordinator to pick up QUEUED jobs immediately.
         scope.launch {
             try {
                 database.chunkDao().finalizeCompletedTranslatingChunks()
                 database.chunkDao().resetTranslatingChunksToPending()
+                database.jobDao().resetPausingJobsToPaused()
                 database.jobDao().resetRunningJobsToQueued()
                 startQueueProcessing()
             } catch (e: Exception) {
                 Log.e("QueueManager", "Error during startup queue recovery", e)
             }
         }
+    }
+
+    private fun updateActiveCounts() {
+        val total = activeWorkersCounter.get().coerceAtLeast(0)
+        _activeWorkers.value = total
+        _activeWorkersByJob.value = inFlightByJob.mapValues { it.value.get() }.filterValues { it > 0 }
     }
 
     fun startQueueProcessing() {
@@ -138,9 +150,10 @@ class TranslationQueueManager(
                     continue
                 }
 
-                // Re-verify the job's current status in the database to guarantee it wasn't PAUSED or CANCELLED
+                // Re-verify the job's current status in the database to guarantee it wasn't PAUSED, PAUSING, or CANCELLED
                 val currentJob = database.jobDao().getJobById(chunk.jobId)
-                if (currentJob == null || currentJob.status == "PAUSED" || currentJob.status == "CANCELLED") {
+                if (currentJob == null || currentJob.status == "PAUSED" || currentJob.status == "PAUSING" || 
+                    currentJob.status == "CANCELLED" || currentJob.status == "COMPLETED" || currentJob.status == "FAILED") {
                     // Revert claimed chunk back to PENDING so progress is never lost
                     database.chunkDao().updateChunkResult(
                         id = chunk.id,
@@ -150,29 +163,30 @@ class TranslationQueueManager(
                         translatedText = null,
                         errorMessage = null
                     )
-                    delay(200)
+                    delay(100)
                     continue
                 }
 
                 // Transition job status to RUNNING if it is currently QUEUED
-                if (currentJob.status != "RUNNING") {
+                if (currentJob.status == "QUEUED") {
                     database.jobDao().updateJobStatus(currentJob.id, "RUNNING")
                 }
 
                 // Execute translation task
                 try {
-                    // Increment active worker counter immediately before starting network request
-                    val count = activeWorkersCounter.incrementAndGet()
-                    _activeWorkers.value = count
+                    // Increment active worker counters immediately before starting network request
+                    inFlightByJob.computeIfAbsent(chunk.jobId) { AtomicInteger(0) }.incrementAndGet()
+                    activeWorkersCounter.incrementAndGet()
+                    updateActiveCounts()
 
                     val (success, translatedText, error) = executeChunkWithRetry(
                         chunk = chunk,
                         maxRetries = settings.maxRetries
                     )
 
-                    // Re-check database state in case the job was PAUSED while the chunk was in-flight
+                    // Re-check database state in case the job was PAUSED or PAUSING while the chunk was in-flight
                     val jobAfterRequest = database.jobDao().getJobById(chunk.jobId)
-                    val isJobPaused = jobAfterRequest?.status == "PAUSED"
+                    val isJobPausedOrPausing = jobAfterRequest?.status == "PAUSED" || jobAfterRequest?.status == "PAUSING"
 
                     if (success && !translatedText.isNullOrBlank()) {
                         // Translation succeeded: safely save completed chunk associated with exact ids
@@ -186,7 +200,7 @@ class TranslationQueueManager(
                         )
                     } else {
                         // Translation request failed
-                        if (isJobPaused) {
+                        if (isJobPausedOrPausing) {
                             // If paused during execution, restore chunk to PENDING for when resumed
                             database.chunkDao().updateChunkResult(
                                 id = chunk.id,
@@ -224,8 +238,16 @@ class TranslationQueueManager(
                     )
                 } finally {
                     // Decrement active worker counter in finally to guarantee accurate accounting
-                    val count = activeWorkersCounter.decrementAndGet().coerceAtLeast(0)
-                    _activeWorkers.value = count
+                    val remainingInJob = inFlightByJob[chunk.jobId]?.decrementAndGet()?.coerceAtLeast(0) ?: 0
+                    activeWorkersCounter.decrementAndGet().coerceAtLeast(0)
+                    updateActiveCounts()
+
+                    // Check if job was PAUSING and has now finished all in-flight chunks
+                    val jobState = database.jobDao().getJobById(chunk.jobId)
+                    if (jobState?.status == "PAUSING" && remainingInJob == 0) {
+                        database.jobDao().updateJobStatus(chunk.jobId, "PAUSED")
+                        Log.i("QueueManager", "Job ${chunk.jobId} all in-flight chunks completed -> PAUSED")
+                    }
 
                     updateJobProgress(chunk.jobId)
                     checkAndFinalizeJob(chunk.jobId)
@@ -390,8 +412,8 @@ class TranslationQueueManager(
             return
         }
 
-        // Preserve PAUSED or CANCELLED statuses
-        if (currentJob.status == "PAUSED" || currentJob.status == "CANCELLED") {
+        // Preserve PAUSED, PAUSING, or CANCELLED statuses
+        if (currentJob.status == "PAUSED" || currentJob.status == "PAUSING" || currentJob.status == "CANCELLED") {
             database.jobDao().updateJobProgress(jobId, completed, failed, progress, currentJob.status)
             return
         }
@@ -414,6 +436,12 @@ class TranslationQueueManager(
                     updatedAt = System.currentTimeMillis()
                 )
             )
+            return
+        }
+
+        // If job was QUEUED and no workers are translating yet, preserve QUEUED
+        if (currentJob.status == "QUEUED" && translating == 0) {
+            database.jobDao().updateJobProgress(jobId, completed, failed, progress, "QUEUED")
             return
         }
 
@@ -551,12 +579,24 @@ class TranslationQueueManager(
     }
 
     /**
-     * Pauses the given translation job in the database.
-     * In-flight chunk requests finish safely; no new chunks will be claimed for this book.
+     * Atomically pauses the given translation job.
+     * Transitions RUNNING -> PAUSING (or QUEUED -> PAUSED if 0 in-flight requests).
+     * Stops scheduling new chunks immediately. In-flight requests complete naturally.
+     * When in-flight count drops to 0, automatically transitions PAUSING -> PAUSED.
      */
     fun pauseJob(jobId: String) {
         scope.launch {
-            database.jobDao().updateJobStatus(jobId, "PAUSED")
+            val job = database.jobDao().getJobById(jobId) ?: return@launch
+            if (job.status == "COMPLETED" || job.status == "CANCELLED" || job.status == "PAUSED") return@launch
+
+            val inFlight = inFlightByJob[jobId]?.get() ?: 0
+            if (inFlight == 0) {
+                database.jobDao().updateJobStatus(jobId, "PAUSED")
+                Log.i("QueueManager", "Job $jobId transitioned directly to PAUSED (0 in-flight requests)")
+            } else {
+                database.jobDao().updateJobStatus(jobId, "PAUSING")
+                Log.i("QueueManager", "Job $jobId set to PAUSING ($inFlight in-flight requests remaining)")
+            }
         }
     }
 
@@ -566,8 +606,12 @@ class TranslationQueueManager(
      */
     fun resumeJob(jobId: String) {
         scope.launch {
-            database.jobDao().updateJobStatus(jobId, "QUEUED")
-            startQueueProcessing()
+            val job = database.jobDao().getJobById(jobId) ?: return@launch
+            if (job.status == "PAUSED" || job.status == "PAUSING") {
+                database.jobDao().updateJobStatus(jobId, "QUEUED")
+                startQueueProcessing()
+                Log.i("QueueManager", "Job $jobId resumed (status set to QUEUED)")
+            }
         }
     }
 

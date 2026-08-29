@@ -38,7 +38,9 @@ object EpubRebuilder {
         bookId: String,
         jobId: String,
         database: AppDatabase,
-        outputFile: File
+        outputFile: File,
+        selectedChapterIds: Set<String>? = null,
+        customTitle: String? = null
     ) {
         if (!sourceEpubFile.exists() || sourceEpubFile.length() == 0L) {
             throw IllegalArgumentException("Source EPUB file not found or empty: ${sourceEpubFile.absolutePath}")
@@ -55,20 +57,21 @@ object EpubRebuilder {
         }
 
         try {
-            buildEpubToTempFile(
+            val chaptersToExport = buildEpubToTempFile(
                 sourceEpubFile = sourceEpubFile,
                 bookId = bookId,
                 jobId = jobId,
                 database = database,
-                tempOutputFile = tempOutputFile
+                tempOutputFile = tempOutputFile,
+                selectedChapterIds = selectedChapterIds,
+                customTitle = customTitle
             )
 
             // Post-construction validation
-            val chapters = database.chapterDao().getChaptersByBook(bookId)
             val book = database.bookDao().getBookById(bookId)
             val validation = EpubValidator.validateFinalEpub(
                 exportedFile = tempOutputFile,
-                expectedChapterCount = chapters.size,
+                expectedChapterCount = chaptersToExport.size,
                 hadOriginalCover = book?.coverPath != null
             )
 
@@ -107,8 +110,10 @@ object EpubRebuilder {
         bookId: String,
         jobId: String,
         database: AppDatabase,
-        tempOutputFile: File
-    ) {
+        tempOutputFile: File,
+        selectedChapterIds: Set<String>? = null,
+        customTitle: String? = null
+    ): List<ChapterEntity> {
         val sourceZip = ZipFile(sourceEpubFile)
         try {
             // 1. Locate container.xml and find OPF path
@@ -152,7 +157,16 @@ object EpubRebuilder {
 
             // 3. Load Book Metadata and Chapter Entities from DB
             val book = database.bookDao().getBookById(bookId)
-            val chapters = database.chapterDao().getChaptersByBook(bookId)
+            val allChapters = database.chapterDao().getChaptersByBook(bookId)
+            val chaptersToExport = if (!selectedChapterIds.isNullOrEmpty()) {
+                allChapters.filter { selectedChapterIds.contains(it.id) }.sortedBy { it.chapterOrder }
+            } else {
+                allChapters.sortedBy { it.chapterOrder }
+            }
+
+            val allOriginalChapterPaths = allChapters.flatMap {
+                listOf(it.originalHref, EpubParser.resolveZipPath(opfDir, it.originalHref))
+            }.toSet()
 
             // Map chapter Hrefs and Paths
             val chapterPathToEntityMap = mutableMapOf<String, ChapterEntity>()
@@ -161,7 +175,7 @@ object EpubRebuilder {
             // Batch fetch all chapter title chunks in a single query to minimize memory and DB roundtrips
             val chapterTitleChunks = database.chunkDao().getChapterTitleChunks(jobId).associateBy { it.chapterId }
 
-            for (chapter in chapters) {
+            for (chapter in chaptersToExport) {
                 val fullPath = EpubParser.resolveZipPath(opfDir, chapter.originalHref)
                 chapterPathToEntityMap[fullPath] = chapter
                 chapterPathToEntityMap[chapter.originalHref] = chapter
@@ -175,8 +189,9 @@ object EpubRebuilder {
             }
 
             // Get translated Book Title and Description
-            val translatedBookTitle = database.chunkDao().getTitleChunk(jobId)?.translatedText?.takeIf { it.isNotBlank() }
+            val baseTitle = database.chunkDao().getTitleChunk(jobId)?.translatedText?.takeIf { it.isNotBlank() }
                 ?: book?.title ?: opfDoc.select("metadata > dc\\:title, metadata > title").text().ifBlank { "Untitled" }
+            val translatedBookTitle = customTitle ?: baseTitle
 
             val translatedBookDesc = database.chunkDao().getDescriptionChunk(jobId)?.translatedText?.takeIf { it.isNotBlank() }
                 ?: book?.description ?: opfDoc.select("metadata > dc\\:description, metadata > description").text()
@@ -206,13 +221,16 @@ object EpubRebuilder {
                     val cleanEntryName = entryName.trimStart('/')
 
                     when {
-                        // 1. OPF Entry -> Rebuild OPF with English metadata and preserved cover
+                        // 1. OPF Entry -> Rebuild OPF with English metadata and preserved cover & filtered spine
                         cleanEntryName == opfPath || cleanEntryName.equals(opfPath, ignoreCase = true) -> {
                             val rebuiltOpf = rebuildOpfXml(
                                 originalOpfXml = originalOpfXml,
                                 translatedTitle = translatedBookTitle,
                                 translatedDesc = translatedBookDesc,
-                                coverInfo = coverInfo
+                                coverInfo = coverInfo,
+                                chaptersToExport = if (!selectedChapterIds.isNullOrEmpty()) chaptersToExport else null,
+                                manifestMap = manifestMap,
+                                opfDir = opfDir
                             )
                             writeZipEntry(zos, cleanEntryName, rebuiltOpf.toByteArray(Charsets.UTF_8))
                             writtenEntries.add(cleanEntryName)
@@ -221,7 +239,13 @@ object EpubRebuilder {
                         // 2. NCX TOC Entry -> Rebuild NCX with translated title & chapters
                         fullNcxPath != null && (cleanEntryName == fullNcxPath || cleanEntryName.equals(fullNcxPath, ignoreCase = true)) -> {
                             val origNcxXml = sourceZip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
-                            val rebuiltNcx = rebuildNcxXml(origNcxXml, translatedBookTitle, chapterTitleMap)
+                            val rebuiltNcx = rebuildNcxXml(
+                                originalNcxXml = origNcxXml,
+                                translatedBookTitle = translatedBookTitle,
+                                chapterTitleMap = chapterTitleMap,
+                                chaptersToExport = if (!selectedChapterIds.isNullOrEmpty()) chaptersToExport else null,
+                                opfDir = opfDir
+                            )
                             writeZipEntry(zos, cleanEntryName, rebuiltNcx.toByteArray(Charsets.UTF_8))
                             writtenEntries.add(cleanEntryName)
                         }
@@ -229,7 +253,12 @@ object EpubRebuilder {
                         // 3. EPUB3 Nav Entry -> Rebuild Nav with translated titles
                         fullNavPath != null && (cleanEntryName == fullNavPath || cleanEntryName.equals(fullNavPath, ignoreCase = true)) -> {
                             val origNavXml = sourceZip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
-                            val rebuiltNav = rebuildNavXml(origNavXml, chapterTitleMap)
+                            val rebuiltNav = rebuildNavXml(
+                                originalNavXml = origNavXml,
+                                chapterTitleMap = chapterTitleMap,
+                                chaptersToExport = if (!selectedChapterIds.isNullOrEmpty()) chaptersToExport else null,
+                                opfDir = opfDir
+                            )
                             writeZipEntry(zos, cleanEntryName, rebuiltNav.toByteArray(Charsets.UTF_8))
                             writtenEntries.add(cleanEntryName)
                         }
@@ -250,11 +279,13 @@ object EpubRebuilder {
                                     chapterChunks = chapterChunks
                                 )
                                 writeZipEntry(zos, cleanEntryName, rebuiltXhtml.toByteArray(Charsets.UTF_8))
-                            } else {
-                                // Fallback copy if not mapped
-                                streamCopyZipEntry(zos, sourceZip, entry, cleanEntryName)
+                                writtenEntries.add(cleanEntryName)
                             }
-                            writtenEntries.add(cleanEntryName)
+                        }
+
+                        // If it is an unselected chapter file, omit writing it to keep partial EPUB clean
+                        !selectedChapterIds.isNullOrEmpty() && (allOriginalChapterPaths.contains(cleanEntryName) || isChapterEntry(cleanEntryName, allChapters.associateBy { it.originalHref })) -> {
+                            // Skip unselected chapter file
                         }
 
                         // 5. All other resources (Cover image, pictures, CSS, fonts, audio) -> Stream directly
@@ -288,6 +319,8 @@ object EpubRebuilder {
                     }
                 }
             }
+
+            return chaptersToExport
         } finally {
             sourceZip.close()
         }
@@ -395,7 +428,10 @@ object EpubRebuilder {
         originalOpfXml: String,
         translatedTitle: String,
         translatedDesc: String,
-        coverInfo: EpubParser.CoverInfo?
+        coverInfo: EpubParser.CoverInfo?,
+        chaptersToExport: List<ChapterEntity>? = null,
+        manifestMap: Map<String, ManifestItem>? = null,
+        opfDir: String = ""
     ): String {
         val doc = Jsoup.parse(originalOpfXml, "", Parser.xmlParser())
         doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml).charset(Charsets.UTF_8)
@@ -426,6 +462,40 @@ object EpubRebuilder {
         } else {
             val meta = doc.select("metadata, opf\\:metadata").first()
             meta?.appendElement("dc:language")?.text("en")
+        }
+
+        // Filter Spine for partial / range exports if chaptersToExport is specified
+        if (chaptersToExport != null && manifestMap != null) {
+            val allowedHrefs = chaptersToExport.flatMap {
+                listOf(
+                    it.originalHref,
+                    EpubParser.resolveZipPath(opfDir, it.originalHref),
+                    try { URLDecoder.decode(it.originalHref, "UTF-8") } catch (_: Exception) { it.originalHref }
+                )
+            }.toSet()
+
+            val spineElem = doc.select("spine, opf\\:spine").first()
+            if (spineElem != null) {
+                val itemrefs = spineElem.select("itemref, opf\\:itemref")
+                for (itemref in itemrefs) {
+                    val idref = itemref.attr("idref")
+                    val item = manifestMap[idref]
+                    val itemHref = item?.href ?: ""
+                    val itemFullPath = EpubParser.resolveZipPath(opfDir, itemHref)
+
+                    val isCoverOrTitlepage = (coverInfo != null && coverInfo.itemId == idref) ||
+                            itemHref.contains("cover", ignoreCase = true) ||
+                            idref.contains("cover", ignoreCase = true)
+
+                    val isAllowedChapter = allowedHrefs.contains(itemHref) ||
+                            allowedHrefs.contains(itemFullPath) ||
+                            allowedHrefs.any { itemHref.endsWith(it) || itemFullPath.endsWith(it) }
+
+                    if (!isCoverOrTitlepage && !isAllowedChapter) {
+                        itemref.remove()
+                    }
+                }
+            }
         }
 
         // Ensure Cover metadata & manifest properties are preserved
@@ -467,7 +537,9 @@ object EpubRebuilder {
     private fun rebuildNcxXml(
         originalNcxXml: String,
         translatedBookTitle: String,
-        chapterTitleMap: Map<String, String>
+        chapterTitleMap: Map<String, String>,
+        chaptersToExport: List<ChapterEntity>? = null,
+        opfDir: String = ""
     ): String {
         val doc = Jsoup.parse(originalNcxXml, "", Parser.xmlParser())
         doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml).charset(Charsets.UTF_8)
@@ -475,11 +547,30 @@ object EpubRebuilder {
         // Update docTitle
         doc.select("docTitle > text").first()?.text(translatedBookTitle)
 
-        // Update navPoints
+        val allowedHrefs = chaptersToExport?.flatMap {
+            listOf(
+                it.originalHref,
+                EpubParser.resolveZipPath(opfDir, it.originalHref),
+                try { URLDecoder.decode(it.originalHref, "UTF-8") } catch (_: Exception) { it.originalHref }
+            )
+        }?.toSet()
+
+        // Update & filter navPoints
         for (navPoint in doc.select("navPoint")) {
             val contentSrc = navPoint.select("content").attr("src").substringBefore('#')
             val translated = chapterTitleMap[contentSrc]
                 ?: chapterTitleMap.entries.firstOrNull { contentSrc.endsWith(it.key) || it.key.endsWith(contentSrc) }?.value
+
+            if (allowedHrefs != null) {
+                val isAllowed = allowedHrefs.contains(contentSrc) ||
+                        allowedHrefs.contains(EpubParser.resolveZipPath(opfDir, contentSrc)) ||
+                        allowedHrefs.any { contentSrc.endsWith(it) || it.endsWith(contentSrc) }
+                if (!isAllowed) {
+                    navPoint.remove()
+                    continue
+                }
+            }
+
             if (translated != null) {
                 navPoint.select("navLabel > text").first()?.text(translated)
             }
@@ -490,15 +581,36 @@ object EpubRebuilder {
 
     private fun rebuildNavXml(
         originalNavXml: String,
-        chapterTitleMap: Map<String, String>
+        chapterTitleMap: Map<String, String>,
+        chaptersToExport: List<ChapterEntity>? = null,
+        opfDir: String = ""
     ): String {
         val doc = Jsoup.parse(originalNavXml, "", Parser.htmlParser())
         doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml).charset(Charsets.UTF_8)
+
+        val allowedHrefs = chaptersToExport?.flatMap {
+            listOf(
+                it.originalHref,
+                EpubParser.resolveZipPath(opfDir, it.originalHref),
+                try { URLDecoder.decode(it.originalHref, "UTF-8") } catch (_: Exception) { it.originalHref }
+            )
+        }?.toSet()
 
         for (a in doc.select("nav a[href]")) {
             val href = a.attr("href").substringBefore('#')
             val translated = chapterTitleMap[href]
                 ?: chapterTitleMap.entries.firstOrNull { href.endsWith(it.key) || it.key.endsWith(href) }?.value
+
+            if (allowedHrefs != null) {
+                val isAllowed = allowedHrefs.contains(href) ||
+                        allowedHrefs.contains(EpubParser.resolveZipPath(opfDir, href)) ||
+                        allowedHrefs.any { href.endsWith(it) || it.endsWith(href) }
+                if (!isAllowed) {
+                    a.parent()?.remove() ?: a.remove()
+                    continue
+                }
+            }
+
             if (translated != null) {
                 a.text(translated)
             }

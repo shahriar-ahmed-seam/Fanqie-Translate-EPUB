@@ -6,18 +6,27 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.TranslatorApplication
+import com.example.data.db.BookEntity
+import com.example.data.db.TranslationJobEntity
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 
 class TranslationService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var notificationJob: Job? = null
+
+    private data class NotificationState(
+        val jobs: List<TranslationJobEntity>,
+        val books: Map<String, BookEntity>,
+        val activeWorkers: Int,
+        val maxWorkers: Int
+    )
 
     companion object {
         const val CHANNEL_ID = "epub_translation_channel"
@@ -111,7 +120,7 @@ class TranslationService : Service() {
     }
 
     private fun startInForeground() {
-        val initialNotification = buildNotification("Translation service active", 0, 0, 0, false)
+        val initialNotification = buildInitialNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -127,58 +136,33 @@ class TranslationService : Service() {
         val app = applicationContext as? TranslatorApplication ?: return
         val database = app.database
         val queueManager = app.queueManager
+        val settingsRepository = app.settingsRepository
 
         notificationJob?.cancel()
         notificationJob = serviceScope.launch {
             combine(
-                database.jobDao().observeActiveJobs(),
-                queueManager.activeWorkers
-            ) { activeJobs, activeWorkers ->
-                Pair(activeJobs, activeWorkers)
-            }.collect { (activeJobs, activeWorkers) ->
+                database.jobDao().getAllJobs(),
+                database.bookDao().getAllBooks(),
+                queueManager.activeWorkers,
+                settingsRepository.settings
+            ) { allJobs, allBooks, activeWorkers, settings ->
+                NotificationState(
+                    jobs = allJobs,
+                    books = allBooks.associateBy { it.id },
+                    activeWorkers = activeWorkers,
+                    maxWorkers = settings.workerCount
+                )
+            }.conflate().collect { state ->
                 val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                if (notificationManager == null) return@collect
+                    ?: return@collect
 
-                if (activeJobs.isEmpty()) {
-                    val notif = buildNotification(
-                        content = "Queue idle • 0 active jobs",
-                        progressMax = 0,
-                        progressCurrent = 0,
-                        activeWorkers = activeWorkers,
-                        isIndeterminate = false
-                    )
-                    notificationManager.notify(NOTIFICATION_ID, notif)
-                } else {
-                    val totalChunks = activeJobs.sumOf { it.totalChunks }
-                    val completedChunks = activeJobs.sumOf { it.completedChunks }
-                    val currentJob = activeJobs.firstOrNull { it.status == "RUNNING" || it.status == "TRANSLATING" }
-                        ?: activeJobs.first()
-
-                    val book = database.bookDao().getBookById(currentJob.bookId)
-                    val bookTitle = book?.title ?: "Translating EPUB"
-
-                    val content = "$bookTitle • $completedChunks/$totalChunks chunks"
-
-                    val notif = buildNotification(
-                        content = content,
-                        progressMax = if (totalChunks > 0) totalChunks else 100,
-                        progressCurrent = completedChunks,
-                        activeWorkers = activeWorkers,
-                        isIndeterminate = totalChunks == 0
-                    )
-                    notificationManager.notify(NOTIFICATION_ID, notif)
-                }
+                val notif = buildGroupedNotification(state)
+                notificationManager.notify(NOTIFICATION_ID, notif)
             }
         }
     }
 
-    private fun buildNotification(
-        content: String,
-        progressMax: Int,
-        progressCurrent: Int,
-        activeWorkers: Int,
-        isIndeterminate: Boolean
-    ): Notification {
+    private fun buildGroupedNotification(state: NotificationState): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -189,18 +173,154 @@ class TranslationService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val subText = if (activeWorkers > 0) "Workers: $activeWorkers active" else "Workers idle"
+        val activeOrQueuedJobs = state.jobs.filter {
+            it.status in listOf("RUNNING", "TRANSLATING", "PAUSING", "QUEUED", "PAUSED")
+        }
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pendingIntent)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+
+        if (activeOrQueuedJobs.isEmpty()) {
+            val hasCompleted = state.jobs.any { it.status == "COMPLETED" }
+            val title = if (hasCompleted) "All translations completed" else "EPUB Translator"
+            val text = if (hasCompleted) "All EPUB translations finished successfully." else "Queue idle • 0 active jobs"
+
+            return builder
+                .setContentTitle(title)
+                .setContentText(text)
+                .setSubText(if (hasCompleted) "Completed" else "Idle")
+                .setOngoing(false)
+                .setProgress(0, 0, false)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .build()
+        }
+
+        val subText = "Workers: ${state.activeWorkers} / ${state.maxWorkers}"
+        val totalChunksSum = activeOrQueuedJobs.sumOf { it.totalChunks }
+        val completedChunksSum = activeOrQueuedJobs.sumOf { it.completedChunks }
+        val runningCount = activeOrQueuedJobs.count { it.status == "RUNNING" || it.status == "TRANSLATING" }
+        val hasActiveNetwork = state.activeWorkers > 0 || runningCount > 0
+
+        if (activeOrQueuedJobs.size == 1) {
+            val job = activeOrQueuedJobs.first()
+            val bookTitle = state.books[job.bookId]?.title ?: "Translating EPUB"
+            val percent = if (job.totalChunks > 0) (job.completedChunks * 100 / job.totalChunks) else 0
+            val statusLabel = when (job.status) {
+                "PAUSED" -> " — PAUSED"
+                "PAUSING" -> " — PAUSING..."
+                "QUEUED" -> " — QUEUED"
+                else -> ""
+            }
+
+            val title = "$bookTitle$statusLabel"
+            val contentText = "${job.completedChunks} / ${job.totalChunks} chunks · $percent%"
+
+            val bigTextContent = buildString {
+                appendLine(title)
+                appendLine(contentText)
+                append("\n$subText")
+            }
+
+            builder
+                .setContentTitle(title)
+                .setContentText(contentText)
+                .setSubText(subText)
+                .setOngoing(true)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(bigTextContent))
+
+            if (job.status == "PAUSED" && !hasActiveNetwork) {
+                builder.setProgress(0, 0, false)
+            } else {
+                builder.setProgress(if (job.totalChunks > 0) job.totalChunks else 100, job.completedChunks, false)
+            }
+
+            return builder.build()
+        }
+
+        // Multiple novels in active/queued queue
+        val contentTitle = if (runningCount > 0) {
+            "$runningCount novels translating"
+        } else {
+            "${activeOrQueuedJobs.size} novels in queue"
+        }
+
+        // Collapsed summary text
+        val summaryText = activeOrQueuedJobs.take(2).joinToString(" · ") { job ->
+            val title = state.books[job.bookId]?.title ?: "Novel"
+            val percent = if (job.totalChunks > 0) (job.completedChunks * 100 / job.totalChunks) else 0
+            val suffix = if (job.status == "PAUSED") " (PAUSED)" else " ($percent%)"
+            "$title$suffix"
+        }
+
+        // Expanded BigText multi-novel details
+        val bigTextContent = buildString {
+            val displayJobs = activeOrQueuedJobs.take(3)
+            displayJobs.forEachIndexed { index, job ->
+                val bookTitle = state.books[job.bookId]?.title ?: "Novel"
+                val percent = if (job.totalChunks > 0) (job.completedChunks * 100 / job.totalChunks) else 0
+                val statusLabel = when (job.status) {
+                    "PAUSED" -> " — PAUSED"
+                    "PAUSING" -> " — PAUSING..."
+                    "QUEUED" -> " — QUEUED"
+                    else -> ""
+                }
+                appendLine("$bookTitle$statusLabel")
+                appendLine("${job.completedChunks} / ${job.totalChunks} chunks · $percent%")
+                if (index < displayJobs.size - 1) {
+                    appendLine()
+                }
+            }
+
+            val remainingCount = activeOrQueuedJobs.size - displayJobs.size
+            if (remainingCount > 0) {
+                appendLine()
+                appendLine("+ $remainingCount more ${if (remainingCount == 1) "novel" else "novels"}")
+            }
+
+            append("\n$subText")
+        }
+
+        builder
+            .setContentTitle(contentTitle)
+            .setContentText(summaryText)
+            .setSubText(subText)
+            .setOngoing(true)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigTextContent))
+
+        if (!hasActiveNetwork && activeOrQueuedJobs.all { it.status == "PAUSED" }) {
+            builder.setProgress(0, 0, false)
+        } else {
+            builder.setProgress(if (totalChunksSum > 0) totalChunksSum else 100, completedChunksSum, false)
+        }
+
+        return builder.build()
+    }
+
+    private fun buildInitialNotification(): Notification {
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            openAppIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("EPUB Translator")
-            .setContentText(content)
-            .setSubText(subText)
+            .setContentText("Translation service active")
+            .setSubText("Starting...")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setProgress(progressMax, progressCurrent, isIndeterminate)
             .build()
     }
 }
+

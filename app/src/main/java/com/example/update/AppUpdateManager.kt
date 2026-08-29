@@ -51,7 +51,7 @@ class AppUpdateManager(private val context: Context) {
                 val json = JSONObject(body)
 
                 val tagName = json.optString("tag_name", "")
-                val versionName = tagName.removePrefix("v").trim()
+                val versionName = normalizeVersion(tagName)
                 val releaseNotes = json.optString("body", "No release notes provided.")
 
                 var apkDownloadUrl: String? = null
@@ -127,10 +127,22 @@ class AppUpdateManager(private val context: Context) {
     }
 
     companion object {
+        fun normalizeVersion(raw: String): String {
+            return raw.trim()
+                .removePrefix("v")
+                .removePrefix("V")
+                .substringBefore("-")
+                .substringBefore("+")
+                .trim()
+        }
+
         fun isVersionNewer(remoteVersion: String, currentVersion: String): Boolean {
-            if (remoteVersion.isBlank() || currentVersion.isBlank()) return false
-            val remoteParts = remoteVersion.split(".").mapNotNull { it.toIntOrNull() }
-            val currentParts = currentVersion.split(".").mapNotNull { it.toIntOrNull() }
+            val cleanRemote = normalizeVersion(remoteVersion)
+            val cleanCurrent = normalizeVersion(currentVersion)
+            if (cleanRemote.isBlank() || cleanCurrent.isBlank()) return false
+
+            val remoteParts = cleanRemote.split(".").map { it.toIntOrNull() ?: 0 }
+            val currentParts = cleanCurrent.split(".").map { it.toIntOrNull() ?: 0 }
 
             val maxLen = maxOf(remoteParts.size, currentParts.size)
             for (i in 0 until maxLen) {

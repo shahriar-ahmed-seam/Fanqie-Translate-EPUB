@@ -59,6 +59,9 @@ class MainActivity : ComponentActivity() {
 fun MainApp(viewModel: MainViewModel) {
     val context = LocalContext.current
     var currentScreen by remember { mutableStateOf(Screen.HOME) }
+    var selectedBookIdForDetail by remember { mutableStateOf<String?>(null) }
+    var activeReaderChapter by remember { mutableStateOf<Pair<String, String>?>(null) } // bookId to chapterId
+
     val snackbarHostState = remember { SnackbarHostState() }
 
     val booksWithJobs by viewModel.allBooksWithJobs.collectAsStateWithLifecycle()
@@ -103,104 +106,124 @@ fun MainApp(viewModel: MainViewModel) {
         exportLauncher.launch(exportFileName)
     }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = {
-            NavigationBar(modifier = Modifier.testTag("bottom_nav_bar")) {
-                NavigationBarItem(
-                    selected = currentScreen == Screen.HOME,
-                    onClick = { currentScreen = Screen.HOME },
-                    icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
-                    label = { Text("Home") },
-                    modifier = Modifier.testTag("nav_home")
-                )
-                NavigationBarItem(
-                    selected = currentScreen == Screen.QUEUE,
-                    onClick = { currentScreen = Screen.QUEUE },
-                    icon = {
-                        BadgedBox(
-                            badge = {
-                                val activeCount = booksWithJobs.count { it.job?.status == "TRANSLATING" || it.job?.status == "QUEUED" }
-                                if (activeCount > 0) {
-                                    Badge { Text("$activeCount") }
+    if (activeReaderChapter != null) {
+        val (bId, chId) = activeReaderChapter!!
+        ReaderScreen(
+            bookId = bId,
+            initialChapterId = chId,
+            viewModel = viewModel,
+            onNavigateBack = { activeReaderChapter = null }
+        )
+    } else if (selectedBookIdForDetail != null) {
+        NovelDetailScreen(
+            bookId = selectedBookIdForDetail!!,
+            viewModel = viewModel,
+            onNavigateBack = { selectedBookIdForDetail = null },
+            onOpenReader = { chId ->
+                activeReaderChapter = Pair(selectedBookIdForDetail!!, chId)
+            }
+        )
+    } else {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            bottomBar = {
+                NavigationBar(modifier = Modifier.testTag("bottom_nav_bar")) {
+                    NavigationBarItem(
+                        selected = currentScreen == Screen.HOME,
+                        onClick = { currentScreen = Screen.HOME },
+                        icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+                        label = { Text("Home") },
+                        modifier = Modifier.testTag("nav_home")
+                    )
+                    NavigationBarItem(
+                        selected = currentScreen == Screen.QUEUE,
+                        onClick = { currentScreen = Screen.QUEUE },
+                        icon = {
+                            BadgedBox(
+                                badge = {
+                                    val activeCount = booksWithJobs.count { it.job?.status == "TRANSLATING" || it.job?.status == "QUEUED" }
+                                    if (activeCount > 0) {
+                                        Badge { Text("$activeCount") }
+                                    }
                                 }
+                            ) {
+                                Icon(Icons.Default.ListAlt, contentDescription = "Queue")
                             }
-                        ) {
-                            Icon(Icons.Default.ListAlt, contentDescription = "Queue")
-                        }
-                    },
-                    label = { Text("Queue") },
-                    modifier = Modifier.testTag("nav_queue")
-                )
-                NavigationBarItem(
-                    selected = currentScreen == Screen.SETTINGS,
-                    onClick = { currentScreen = Screen.SETTINGS },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                    label = { Text("Settings") },
-                    modifier = Modifier.testTag("nav_settings")
-                )
+                        },
+                        label = { Text("Queue") },
+                        modifier = Modifier.testTag("nav_queue")
+                    )
+                    NavigationBarItem(
+                        selected = currentScreen == Screen.SETTINGS,
+                        onClick = { currentScreen = Screen.SETTINGS },
+                        icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
+                        label = { Text("Settings") },
+                        modifier = Modifier.testTag("nav_settings")
+                    )
+                }
+            }
+        ) { innerPadding ->
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                when (currentScreen) {
+                    Screen.HOME -> HomeScreen(
+                        booksWithJobs = booksWithJobs,
+                        activeWorkers = activeWorkers,
+                        activeWorkersByJob = activeWorkersByJob,
+                        exportingBookIds = exportingBookIds,
+                        isProcessing = isProcessing,
+                        onSelectSingleEpub = { viewModel.previewSingleEpub(it) },
+                        onSelectMultipleEpubs = { viewModel.importMultipleEpubs(it) },
+                        onNavigateToQueue = { currentScreen = Screen.QUEUE },
+                        onOpenNovelDetail = { bookId -> selectedBookIdForDetail = bookId },
+                        onExportEpub = onExport,
+                        onPauseJob = { viewModel.pauseJob(it) },
+                        onResumeJob = { viewModel.resumeJob(it) },
+                        onRetryJob = { viewModel.retryFailed(it) },
+                        onDeleteBook = { viewModel.deleteBook(it) }
+                    )
+                    Screen.QUEUE -> QueueScreen(
+                        booksWithJobs = booksWithJobs,
+                        activeWorkers = activeWorkers,
+                        activeWorkersByJob = activeWorkersByJob,
+                        exportingBookIds = exportingBookIds,
+                        settings = settings,
+                        onPauseJob = { viewModel.pauseJob(it) },
+                        onResumeJob = { viewModel.resumeJob(it) },
+                        onRetryJob = { viewModel.retryFailed(it) },
+                        onCancelJob = { viewModel.cancelJob(it) },
+                        onExportEpub = onExport
+                    )
+                    Screen.SETTINGS -> SettingsScreen(
+                        settings = settings,
+                        onSaveSettings = { viewModel.updateSettings(it) },
+                        onCheckForUpdates = { viewModel.checkForUpdates(silent = false) }
+                    )
+                }
             }
         }
-    ) { innerPadding ->
-        Surface(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            when (currentScreen) {
-                Screen.HOME -> HomeScreen(
-                    booksWithJobs = booksWithJobs,
-                    activeWorkers = activeWorkers,
-                    activeWorkersByJob = activeWorkersByJob,
-                    exportingBookIds = exportingBookIds,
-                    isProcessing = isProcessing,
-                    onSelectSingleEpub = { viewModel.previewSingleEpub(it) },
-                    onSelectMultipleEpubs = { viewModel.importMultipleEpubs(it) },
-                    onNavigateToQueue = { currentScreen = Screen.QUEUE },
-                    onExportEpub = onExport,
-                    onPauseJob = { viewModel.pauseJob(it) },
-                    onResumeJob = { viewModel.resumeJob(it) },
-                    onRetryJob = { viewModel.retryFailed(it) },
-                    onDeleteBook = { viewModel.deleteBook(it) }
-                )
-                Screen.QUEUE -> QueueScreen(
-                    booksWithJobs = booksWithJobs,
-                    activeWorkers = activeWorkers,
-                    activeWorkersByJob = activeWorkersByJob,
-                    exportingBookIds = exportingBookIds,
-                    settings = settings,
-                    onPauseJob = { viewModel.pauseJob(it) },
-                    onResumeJob = { viewModel.resumeJob(it) },
-                    onRetryJob = { viewModel.retryFailed(it) },
-                    onCancelJob = { viewModel.cancelJob(it) },
-                    onExportEpub = onExport
-                )
-                Screen.SETTINGS -> SettingsScreen(
-                    settings = settings,
-                    onSaveSettings = { viewModel.updateSettings(it) },
-                    onCheckForUpdates = { viewModel.checkForUpdates(silent = false) }
-                )
-            }
-        }
+    }
 
-        // Book Preview Dialog
-        previewState?.let { preview ->
-            BookPreviewDialog(
-                previewState = preview,
-                onDismiss = { viewModel.closePreview() },
-                onConfirm = { viewModel.enqueuePreviewedBook() }
-            )
-        }
+    // Book Preview Dialog
+    previewState?.let { preview ->
+        BookPreviewDialog(
+            previewState = preview,
+            onDismiss = { viewModel.closePreview() },
+            onConfirm = { viewModel.enqueuePreviewedBook() }
+        )
+    }
 
-        // In-App Update Dialog
-        updateState?.let { releaseInfo ->
-            UpdateDialog(
-                releaseInfo = releaseInfo,
-                downloadProgress = updateProgress,
-                onDismiss = { viewModel.dismissUpdateDialog() },
-                onDownload = { downloadUrl -> viewModel.startApkDownload(downloadUrl) }
-            )
-        }
+    // In-App Update Dialog
+    updateState?.let { releaseInfo ->
+        UpdateDialog(
+            releaseInfo = releaseInfo,
+            downloadProgress = updateProgress,
+            onDismiss = { viewModel.dismissUpdateDialog() },
+            onDownload = { downloadUrl -> viewModel.startApkDownload(downloadUrl) }
+        )
     }
 }

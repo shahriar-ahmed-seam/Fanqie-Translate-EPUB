@@ -18,8 +18,11 @@ android {
     applicationId = "com.aistudio.epubtranslator.qxnrpb"
     minSdk = 24
     targetSdk = 36
-    versionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 1
-    versionName = (project.findProperty("versionName") as? String) ?: "1.0.0"
+    val propVersionCode = (project.findProperty("versionCode")?.toString())?.toIntOrNull() ?: 1
+    val propVersionName = (project.findProperty("versionName")?.toString())?.takeIf { it.isNotBlank() } ?: "1.0.0"
+
+    versionCode = propVersionCode
+    versionName = propVersionName
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

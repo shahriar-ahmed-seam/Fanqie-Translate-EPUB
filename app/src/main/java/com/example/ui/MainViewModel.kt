@@ -54,10 +54,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         books.map { BookWithJob(it, jobMap[it.id]) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val activeWorkersByJob: StateFlow<Map<String, Int>> = database.chunkDao()
-        .observeTranslatingChunkCountsByJob()
-        .map { list -> list.associate { it.jobId to it.count } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+    val activeWorkersByJob: StateFlow<Map<String, Int>> = queueManager.activeWorkersByJob
 
     private val _exportingBookIds = MutableStateFlow<Set<String>>(emptySet())
     val exportingBookIds: StateFlow<Set<String>> = _exportingBookIds.asStateFlow()
@@ -228,6 +225,83 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _exportingBookIds.update { it - bookId }
             }
         }
+    }
+
+    fun exportEnglishEpub(context: Context, bookId: String, destinationUri: Uri) {
+        exportEpubToUri(context, bookId, null, destinationUri)
+    }
+
+    fun exportCustomChapters(
+        context: Context,
+        bookId: String,
+        selectedChapterIds: Set<String>,
+        customTitle: String?,
+        destinationUri: Uri
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (_exportingBookIds.value.contains(bookId)) return@launch
+            _exportingBookIds.update { it + bookId }
+
+            try {
+                val db = AppDatabase.getInstance(context)
+                val book = db.bookDao().getBookById(bookId)
+                    ?: throw IllegalArgumentException("Book not found: $bookId")
+                val job = db.jobDao().getJobByBookId(bookId)
+                    ?: throw IllegalArgumentException("No translation job found for book: $bookId")
+
+                val bookDir = File(getApplication<Application>().filesDir, "books/$bookId")
+                val sourceFile = File(bookDir, "source.epub")
+                if (!sourceFile.exists() || sourceFile.length() == 0L) {
+                    throw IllegalStateException("Original EPUB source file is missing from local storage")
+                }
+
+                val exportDir = File(context.filesDir, "exports")
+                if (!exportDir.exists()) exportDir.mkdirs()
+
+                val sanitizedTitle = (customTitle ?: book.title)
+                    .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                    .trim()
+                    .ifBlank { "novel_custom_export" }
+                val exportName = "${sanitizedTitle}.epub"
+                val exportFile = File(exportDir, "${System.currentTimeMillis()}_$exportName")
+
+                // Rebuild Selected Chapters EPUB
+                com.example.epub.EpubRebuilder.rebuild(
+                    sourceEpubFile = sourceFile,
+                    bookId = bookId,
+                    jobId = job.id,
+                    database = db,
+                    outputFile = exportFile,
+                    selectedChapterIds = selectedChapterIds,
+                    customTitle = customTitle
+                )
+
+                // Stream export file to Destination URI via SAF
+                val outputStream = context.contentResolver.openOutputStream(destinationUri)
+                    ?: throw IllegalStateException("Could not open destination document for writing")
+
+                outputStream.use { output ->
+                    exportFile.inputStream().use { input ->
+                        input.copyTo(output, bufferSize = 32 * 1024)
+                    }
+                }
+
+                _message.value = "Selected chapters exported successfully!"
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "Custom export failed for book $bookId", e)
+                _message.value = "Export failed: ${e.message ?: "Unknown error"}"
+            } finally {
+                _exportingBookIds.update { it - bookId }
+            }
+        }
+    }
+
+    fun getLastReadChapterId(bookId: String): String? {
+        return settingsRepository.getLastReadChapterId(bookId)
+    }
+
+    fun setLastReadChapterId(bookId: String, chapterId: String) {
+        settingsRepository.setLastReadChapterId(bookId, chapterId)
     }
 
     fun updateSettings(newSettings: AppSettings) {

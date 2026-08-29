@@ -32,7 +32,7 @@ fun QueueScreen(
     onExportEpub: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit
 ) {
     val activeAndQueuedJobs = booksWithJobs.filter {
-        it.job?.status in listOf("RUNNING", "TRANSLATING", "QUEUED", "PAUSED", "FAILED", "COMPLETED")
+        it.job?.status in listOf("RUNNING", "TRANSLATING", "PAUSING", "QUEUED", "PAUSED", "FAILED", "COMPLETED")
     }
 
     Scaffold(
@@ -297,6 +297,17 @@ fun QueueJobCard(
                             Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Pause")
+                        }
+                    }
+                    "PAUSING" -> {
+                        OutlinedButton(onClick = { }, enabled = false) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Pausing...")
                         }
                     }
                     "QUEUED" -> {

@@ -37,6 +37,7 @@ fun HomeScreen(
     onSelectSingleEpub: (Uri) -> Unit,
     onSelectMultipleEpubs: (List<Uri>) -> Unit,
     onNavigateToQueue: () -> Unit,
+    onOpenNovelDetail: (String) -> Unit = {},
     onExportEpub: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit,
     onPauseJob: (String) -> Unit,
     onResumeJob: (String) -> Unit,
@@ -226,6 +227,7 @@ fun HomeScreen(
                         item = item,
                         jobActiveWorkers = jobWorkers,
                         isExporting = isExporting,
+                        onCardClick = { onOpenNovelDetail(item.book.id) },
                         onExport = onExportEpub,
                         onPause = onPauseJob,
                         onResume = onResumeJob,
@@ -248,6 +250,7 @@ fun BookJobCard(
     item: BookWithJob,
     jobActiveWorkers: Int = 0,
     isExporting: Boolean = false,
+    onCardClick: () -> Unit = {},
     onExport: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
@@ -259,6 +262,7 @@ fun BookJobCard(
     val job = item.job
 
     Card(
+        onClick = onCardClick,
         modifier = Modifier
             .fillMaxWidth()
             .testTag("book_item_${book.id}"),
@@ -439,6 +443,21 @@ fun BookJobCard(
                             Text("Queue")
                         }
                     }
+                    "PAUSING" -> {
+                        OutlinedButton(onClick = { }, enabled = false) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Pausing...")
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Button(onClick = onNavigateToQueue) {
+                            Text("Queue")
+                        }
+                    }
                     "QUEUED" -> {
                         OutlinedButton(onClick = { onPause(job.id) }) {
                             Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -492,6 +511,11 @@ fun StatusBadge(status: String) {
         } else {
             Triple(Color(0xFF4A1012), Color(0xFFFF8A80), Color(0xFFEF5350))
         }
+        "PAUSING" -> if (isLight) {
+            Triple(Color(0xFFFFF8E1), Color(0xFFF57F17), Color(0xFFFFE082))
+        } else {
+            Triple(Color(0xFF3E361A), Color(0xFFFFE082), Color(0xFFF57F17))
+        }
         "QUEUED" -> if (isLight) {
             Triple(Color(0xFFE3F2FD), Color(0xFF1565C0), Color(0xFF90CAF9))
         } else {
@@ -519,13 +543,18 @@ fun StatusBadge(status: String) {
         }
     }
 
+    val displayLabel = when (status) {
+        "PAUSING" -> "PAUSING..."
+        else -> status
+    }
+
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = bgColor,
         border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
     ) {
         Text(
-            text = status,
+            text = displayLabel,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
             color = textColor,
