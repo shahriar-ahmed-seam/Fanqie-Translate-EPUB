@@ -70,7 +70,11 @@ fun NovelDetailScreen(
     var chapterProgressMap by remember { mutableStateOf<Map<String, Pair<Int, Int>>>(emptyMap()) } // chapterId -> (completed, total)
     var chapterTitlesMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
-    val lastReadChapterId = remember(bookId) { viewModel.getLastReadChapterId(bookId) }
+    var lastReadChapterId by remember(bookId) { mutableStateOf(viewModel.getLastReadChapterId(bookId)) }
+
+    LaunchedEffect(bookId) {
+        lastReadChapterId = viewModel.getLastReadChapterId(bookId)
+    }
 
     LaunchedEffect(bookId, currentBookJob?.job?.id) {
         withContext(Dispatchers.IO) {
@@ -90,7 +94,7 @@ fun NovelDetailScreen(
 
     // Selection mode state
     var isSelectionMode by remember { mutableStateOf(false) }
-    val selectedChapterIds = remember { mutableStateListOf<String>() }
+    var selectedChapterIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showRangeDialog by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
@@ -106,12 +110,14 @@ fun NovelDetailScreen(
     }
 
     LaunchedEffect(chapters, lastReadChapterId) {
-        if (chapters.isNotEmpty() && expandedGroupIndices.isEmpty()) {
+        if (chapters.isNotEmpty()) {
             val targetIndex = if (lastReadChapterId != null) {
                 val ch = chapters.firstOrNull { it.id == lastReadChapterId }
                 if (ch != null) ch.chapterOrder / 100 else 0
             } else 0
-            expandedGroupIndices = setOf(targetIndex)
+            if (!expandedGroupIndices.contains(targetIndex)) {
+                expandedGroupIndices = expandedGroupIndices + targetIndex
+            }
         }
     }
 
@@ -144,6 +150,16 @@ fun NovelDetailScreen(
         }
     }
 
+    // Memoize translated counts per chapter group to avoid O(N) calculations during scrolling/recomposition
+    val groupProgressCounts = remember(chapterGroups, chapterProgressMap) {
+        chapterGroups.associate { group ->
+            group.groupIndex to group.chapters.count { ch ->
+                val prog = chapterProgressMap[ch.id]
+                prog != null && prog.second > 0 && prog.first >= prog.second
+            }
+        }
+    }
+
     // SAF File Creator Launcher for Selected / Range Export
     var pendingExportTitle by remember { mutableStateOf<String?>(null) }
     var pendingExportChapterIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -170,7 +186,30 @@ fun NovelDetailScreen(
         }
     }
 
-    val listState = rememberLazyListState()
+    var savedScrollIndex by rememberSaveable(bookId) { mutableIntStateOf(0) }
+    var savedScrollOffset by rememberSaveable(bookId) { mutableIntStateOf(0) }
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = savedScrollIndex,
+        initialFirstVisibleItemScrollOffset = savedScrollOffset
+    )
+
+    // Restore scroll position as soon as asynchronous chapter list is populated
+    LaunchedEffect(chapters.isNotEmpty()) {
+        if (chapters.isNotEmpty() && savedScrollIndex > 0) {
+            listState.scrollToItem(savedScrollIndex, savedScrollOffset)
+        }
+    }
+
+    // Persist scroll position across compositions and back navigation
+    LaunchedEffect(listState) {
+        snapshotFlow { Pair(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) }
+            .collect { (index, offset) ->
+                if (chapters.isNotEmpty() && (index > 0 || offset > 0)) {
+                    savedScrollIndex = index
+                    savedScrollOffset = offset
+                }
+            }
+    }
 
     Scaffold(
         topBar = {
@@ -187,7 +226,7 @@ fun NovelDetailScreen(
                         onClick = {
                             if (isSelectionMode) {
                                 isSelectionMode = false
-                                selectedChapterIds.clear()
+                                selectedChapterIds = emptySet()
                             } else {
                                 onNavigateBack()
                             }
@@ -205,10 +244,9 @@ fun NovelDetailScreen(
                         IconButton(
                             onClick = {
                                 if (selectedChapterIds.size == chapters.size) {
-                                    selectedChapterIds.clear()
+                                    selectedChapterIds = emptySet()
                                 } else {
-                                    selectedChapterIds.clear()
-                                    selectedChapterIds.addAll(chapters.map { it.id })
+                                    selectedChapterIds = chapters.map { it.id }.toSet()
                                 }
                             }
                         ) {
@@ -244,7 +282,7 @@ fun NovelDetailScreen(
                                         cleanBookTitle to "$cleanBookTitle.epub"
                                     }
                                     pendingExportTitle = exportTitle
-                                    pendingExportChapterIds = selectedChapterIds.toSet()
+                                    pendingExportChapterIds = selectedChapterIds
                                     exportLauncher.launch(defaultFilename)
                                 },
                                 modifier = Modifier.testTag("export_selected_button")
@@ -505,13 +543,11 @@ fun NovelDetailScreen(
                         isTranslated = isFullyTranslated,
                         progress = prog,
                         onToggleSelect = {
-                            if (isSelected) selectedChapterIds.remove(chapter.id)
-                            else selectedChapterIds.add(chapter.id)
+                            selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
                         },
                         onClick = {
                             if (isSelectionMode) {
-                                if (isSelected) selectedChapterIds.remove(chapter.id)
-                                else selectedChapterIds.add(chapter.id)
+                                selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
                             } else {
                                 viewModel.setLastReadChapterId(bookId, chapter.id)
                                 onOpenReader(chapter.id)
@@ -523,11 +559,8 @@ fun NovelDetailScreen(
                 // Grouped into expandable ranges of 100
                 chapterGroups.forEach { group ->
                     val isExpanded = expandedGroupIndices.contains(group.groupIndex)
-                    val translatedInGroup = group.chapters.count { ch ->
-                        val prog = chapterProgressMap[ch.id]
-                        prog != null && prog.second > 0 && prog.first >= prog.second
-                    }
-                    val selectedInGroup = group.chapters.count { selectedChapterIds.contains(it.id) }
+                    val translatedInGroup = groupProgressCounts[group.groupIndex] ?: 0
+                    val selectedInGroup = if (selectedChapterIds.isEmpty()) 0 else group.chapters.count { selectedChapterIds.contains(it.id) }
 
                     item(key = "group_header_${group.groupIndex}") {
                         ChapterGroupHeader(
@@ -544,15 +577,12 @@ fun NovelDetailScreen(
                                 }
                             },
                             onToggleSelectGroup = {
+                                val groupIds = group.chapters.map { it.id }.toSet()
                                 val allSelected = selectedInGroup == group.chapters.size && group.chapters.isNotEmpty()
-                                if (allSelected) {
-                                    group.chapters.forEach { selectedChapterIds.remove(it.id) }
+                                selectedChapterIds = if (allSelected) {
+                                    selectedChapterIds - groupIds
                                 } else {
-                                    group.chapters.forEach {
-                                        if (!selectedChapterIds.contains(it.id)) {
-                                            selectedChapterIds.add(it.id)
-                                        }
-                                    }
+                                    selectedChapterIds + groupIds
                                 }
                             }
                         )
@@ -580,13 +610,11 @@ fun NovelDetailScreen(
                                 isTranslated = isFullyTranslated,
                                 progress = prog,
                                 onToggleSelect = {
-                                    if (isSelected) selectedChapterIds.remove(chapter.id)
-                                    else selectedChapterIds.add(chapter.id)
+                                    selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
                                 },
                                 onClick = {
                                     if (isSelectionMode) {
-                                        if (isSelected) selectedChapterIds.remove(chapter.id)
-                                        else selectedChapterIds.add(chapter.id)
+                                        selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
                                     } else {
                                         viewModel.setLastReadChapterId(bookId, chapter.id)
                                         onOpenReader(chapter.id)
@@ -609,14 +637,13 @@ fun NovelDetailScreen(
             onConfirm = { fromIndex, toIndex ->
                 showRangeDialog = false
                 isSelectionMode = true
-                selectedChapterIds.clear()
                 val sorted = chapters.sortedBy { it.chapterOrder }
                 val start = (fromIndex - 1).coerceIn(0, sorted.size - 1)
                 val end = (toIndex - 1).coerceIn(0, sorted.size - 1)
-                if (start <= end) {
-                    for (i in start..end) {
-                        selectedChapterIds.add(sorted[i].id)
-                    }
+                selectedChapterIds = if (start <= end) {
+                    sorted.subList(start, end + 1).map { it.id }.toSet()
+                } else {
+                    emptySet()
                 }
             }
         )

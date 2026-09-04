@@ -329,6 +329,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         settingsRepository.setLastReadChapterId(bookId, chapterId)
     }
 
+    fun getLastReadParagraphIndex(bookId: String, chapterId: String): Int {
+        return settingsRepository.getLastReadParagraphIndex(bookId, chapterId)
+    }
+
+    fun setLastReadParagraphIndex(bookId: String, chapterId: String, paragraphIndex: Int) {
+        settingsRepository.setLastReadParagraphIndex(bookId, chapterId, paragraphIndex)
+    }
+
     fun updateSettings(newSettings: AppSettings) {
         settingsRepository.updateSettings(newSettings)
         _message.value = "Settings saved"

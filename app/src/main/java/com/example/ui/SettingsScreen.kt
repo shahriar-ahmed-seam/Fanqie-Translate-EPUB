@@ -209,6 +209,11 @@ fun SettingsScreen(
                         Text("Concurrent Workers (1-50):")
                         Text("${workerCount.toInt()}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
+                    Text(
+                        text = "Global parallel translation requests distributed across active books",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Slider(
                         value = workerCount,
                         onValueChange = { workerCount = it },
@@ -226,6 +231,11 @@ fun SettingsScreen(
                         Text("Max Active Books (1-5):")
                         Text("${maxActiveBooks.toInt()}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
+                    Text(
+                        text = "Maximum novels translating concurrently",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Slider(
                         value = maxActiveBooks,
                         onValueChange = { maxActiveBooks = it },
@@ -254,9 +264,14 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("TomatoMTL Safe Chunk Size:")
+                        Text("Safe Chunk Size:")
                         Text("${chunkSize.toInt()} chars", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
+                    Text(
+                        text = "Target character length per text chunk",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Slider(
                         value = chunkSize,
                         onValueChange = { chunkSize = it },
@@ -274,6 +289,11 @@ fun SettingsScreen(
                         Text("Max Retries (on error):")
                         Text("${maxRetries.toInt()} attempts", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
+                    Text(
+                        text = "Retry attempts for transient network errors before marking chunk failed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Slider(
                         value = maxRetries,
                         onValueChange = { maxRetries = it },
@@ -290,6 +310,11 @@ fun SettingsScreen(
                         Text("Request Timeout:")
                         Text("${timeoutSeconds.toInt()}s", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
+                    Text(
+                        text = "Maximum wait time per HTTP request",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Slider(
                         value = timeoutSeconds,
                         onValueChange = { timeoutSeconds = it },

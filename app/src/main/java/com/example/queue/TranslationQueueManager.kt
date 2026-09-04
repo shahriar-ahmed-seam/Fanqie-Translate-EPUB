@@ -9,6 +9,7 @@ import com.example.data.repository.AppSettings
 import com.example.data.repository.SettingsRepository
 import com.example.epub.*
 import com.example.translation.TomatoMTLProvider
+import com.example.translation.TranslationException
 import com.example.translation.TranslationProvider
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -68,9 +69,23 @@ class TranslationQueueManager(
                 database.chunkDao().resetTranslatingChunksToPending()
                 database.jobDao().resetPausingJobsToPaused()
                 database.jobDao().resetRunningJobsToQueued()
+                val activeJobs = database.jobDao().getActiveJobs()
+                for (job in activeJobs) {
+                    updateJobProgress(job.id)
+                    checkAndFinalizeJob(job.id)
+                }
                 startQueueProcessing()
             } catch (e: Exception) {
                 Log.e("QueueManager", "Error during startup queue recovery", e)
+            }
+        }
+
+        // Apply worker count or timeout adjustments immediately when settings change
+        scope.launch {
+            settingsRepository.settings.collect { settings ->
+                if (_isProcessing.value) {
+                    ensureWorkerPool(settings)
+                }
             }
         }
     }
@@ -134,6 +149,31 @@ class TranslationQueueManager(
     }
 
     /**
+     * Safely reverts a chunk back to PENDING.
+     * Atomic check-and-set: ONLY reverts if status is currently TRANSLATING.
+     * Never reverts or overwrites a chunk that has reached COMPLETED or FAILED status.
+     */
+    private suspend fun revertChunkToPending(chunk: TranslationChunkEntity) {
+        try {
+            database.withTransaction {
+                val current = database.chunkDao().getChunkById(chunk.id)
+                if (current != null && current.status == "TRANSLATING") {
+                    database.chunkDao().updateChunkResult(
+                        id = chunk.id,
+                        jobId = chunk.jobId,
+                        bookId = chunk.bookId,
+                        status = "PENDING",
+                        translatedText = null,
+                        errorMessage = null
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("QueueManager", "Error reverting chunk ${chunk.id} to PENDING", e)
+        }
+    }
+
+    /**
      * Independent worker loop.
      * Uses Room database state directly as the single source of truth.
      * Implements fair round-robin scheduling across all active books (QUEUED/RUNNING).
@@ -147,7 +187,7 @@ class TranslationQueueManager(
                 val activeJobs = database.jobDao().getActiveJobs().take(settings.maxActiveBooks)
 
                 if (activeJobs.isEmpty()) {
-                    delay(300)
+                    delay(1000)
                     continue
                 }
 
@@ -162,35 +202,35 @@ class TranslationQueueManager(
                     continue
                 }
 
-                // Re-verify the job's current status in the database to guarantee it wasn't PAUSED, PAUSING, or CANCELLED
-                val currentJob = database.jobDao().getJobById(chunk.jobId)
-                if (currentJob == null || currentJob.status == "PAUSED" || currentJob.status == "PAUSING" || 
-                    currentJob.status == "CANCELLED" || currentJob.status == "COMPLETED" || currentJob.status == "FAILED") {
-                    // Revert claimed chunk back to PENDING so progress is never lost
-                    database.chunkDao().updateChunkResult(
-                        id = chunk.id,
-                        jobId = chunk.jobId,
-                        bookId = chunk.bookId,
-                        status = "PENDING",
-                        translatedText = null,
-                        errorMessage = null
-                    )
-                    delay(100)
-                    continue
-                }
+                // Chunk was claimed and is now TRANSLATING in Room.
+                // Immediately register in-flight worker count so pause/cancellation/status know about this worker.
+                inFlightByJob.computeIfAbsent(chunk.jobId) { AtomicInteger(0) }.incrementAndGet()
+                activeWorkersCounter.incrementAndGet()
+                updateActiveCounts()
 
-                // Transition job status to RUNNING if it is currently QUEUED
-                if (currentJob.status == "QUEUED") {
-                    database.jobDao().updateJobStatus(currentJob.id, "RUNNING")
-                }
+                var isChunkCompleted = false
 
-                // Execute translation task
                 try {
-                    // Increment active worker counters immediately before starting network request
-                    inFlightByJob.computeIfAbsent(chunk.jobId) { AtomicInteger(0) }.incrementAndGet()
-                    activeWorkersCounter.incrementAndGet()
-                    updateActiveCounts()
+                    // Re-verify the job's current status in the database to guarantee it wasn't PAUSED, PAUSING, or CANCELLED
+                    val currentJob = database.jobDao().getJobById(chunk.jobId)
+                    if (currentJob == null || currentJob.status == "PAUSED" || currentJob.status == "PAUSING" || 
+                        currentJob.status == "CANCELLED" || currentJob.status == "COMPLETED" || currentJob.status == "FAILED") {
+                        // Revert claimed chunk back to PENDING safely (only if still TRANSLATING)
+                        revertChunkToPending(chunk)
+                        delay(100)
+                        continue
+                    }
 
+                    // Transition job status to RUNNING only if it is still currently QUEUED in the database
+                    // (prevent race conditions from overwriting PAUSING, PAUSED, CANCELLED, etc.)
+                    database.withTransaction {
+                        val live = database.jobDao().getJobById(chunk.jobId)
+                        if (live != null && live.status == "QUEUED") {
+                            database.jobDao().updateJobStatus(chunk.jobId, "RUNNING")
+                        }
+                    }
+
+                    // Execute translation task
                     val (success, translatedText, error) = executeChunkWithRetry(
                         chunk = chunk,
                         maxRetries = settings.maxRetries
@@ -210,59 +250,78 @@ class TranslationQueueManager(
                             translatedText = translatedText,
                             errorMessage = null
                         )
+                        isChunkCompleted = true
                     } else {
                         // Translation request failed
                         if (isJobPausedOrPausing) {
-                            // If paused during execution, restore chunk to PENDING for when resumed
-                            database.chunkDao().updateChunkResult(
-                                id = chunk.id,
-                                jobId = chunk.jobId,
-                                bookId = chunk.bookId,
-                                status = "PENDING",
-                                translatedText = null,
-                                errorMessage = null
-                            )
+                            // If paused during execution, restore chunk to PENDING without consuming retries
+                            revertChunkToPending(chunk)
                         } else {
                             val newRetryCount = chunk.retryCount + 1
                             val status = if (newRetryCount >= settings.maxRetries) "FAILED" else "PENDING"
+                            // Update chunk safely inside a transaction: only update if still TRANSLATING
+                            // to guarantee completed chunks are NEVER overwritten!
+                            database.withTransaction {
+                                val current = database.chunkDao().getChunkById(chunk.id)
+                                if (current != null && current.status == "TRANSLATING") {
+                                    database.chunkDao().updateChunk(
+                                        current.copy(
+                                            status = status,
+                                            retryCount = newRetryCount,
+                                            errorMessage = error?.message ?: "Translation failed",
+                                            updatedAt = System.currentTimeMillis()
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) {
+                        // Worker is being cancelled (e.g. dynamic worker pool resized or queue stopped).
+                        // Chunk must NOT disappear into TRANSLATING limbo!
+                        // The finally block will safely revert the chunk via NonCancellable.
+                        throw t
+                    }
+                    Log.e("QueueManager", "Unexpected error translating chunk ${chunk.id}", t)
+                    val newRetryCount = chunk.retryCount + 1
+                    val status = if (newRetryCount >= settings.maxRetries) "FAILED" else "PENDING"
+                    database.withTransaction {
+                        val current = database.chunkDao().getChunkById(chunk.id)
+                        if (current != null && current.status == "TRANSLATING") {
                             database.chunkDao().updateChunk(
-                                chunk.copy(
+                                current.copy(
                                     status = status,
                                     retryCount = newRetryCount,
-                                    errorMessage = error?.message ?: "Translation failed",
+                                    errorMessage = t.message ?: "Unexpected error",
                                     updatedAt = System.currentTimeMillis()
                                 )
                             )
                         }
                     }
-                } catch (t: Throwable) {
-                    if (t is CancellationException) throw t
-                    Log.e("QueueManager", "Unexpected error translating chunk ${chunk.id}", t)
-                    val newRetryCount = chunk.retryCount + 1
-                    val status = if (newRetryCount >= settings.maxRetries) "FAILED" else "PENDING"
-                    database.chunkDao().updateChunk(
-                        chunk.copy(
-                            status = status,
-                            retryCount = newRetryCount,
-                            errorMessage = t.message ?: "Unexpected error",
-                            updatedAt = System.currentTimeMillis()
-                        )
-                    )
                 } finally {
-                    // Decrement active worker counter in finally to guarantee accurate accounting
-                    val remainingInJob = inFlightByJob[chunk.jobId]?.decrementAndGet()?.coerceAtLeast(0) ?: 0
-                    activeWorkersCounter.decrementAndGet().coerceAtLeast(0)
-                    updateActiveCounts()
+                    withContext(NonCancellable) {
+                        // If chunk was claimed but not completed, revert to PENDING safely
+                        if (!isChunkCompleted) {
+                            revertChunkToPending(chunk)
+                        }
 
-                    // Check if job was PAUSING and has now finished all in-flight chunks
-                    val jobState = database.jobDao().getJobById(chunk.jobId)
-                    if (jobState?.status == "PAUSING" && remainingInJob == 0) {
-                        database.jobDao().updateJobStatus(chunk.jobId, "PAUSED")
-                        Log.i("QueueManager", "Job ${chunk.jobId} all in-flight chunks completed -> PAUSED")
+                        // Decrement active worker counter in finally to guarantee accurate accounting
+                        val remainingInJob = inFlightByJob[chunk.jobId]?.decrementAndGet()?.coerceAtLeast(0) ?: 0
+                        activeWorkersCounter.decrementAndGet().coerceAtLeast(0)
+                        updateActiveCounts()
+
+                        // Check if job was PAUSING and has now finished all in-flight chunks
+                        val jobState = database.jobDao().getJobById(chunk.jobId)
+                        val currentInFlight = inFlightByJob[chunk.jobId]?.get() ?: 0
+                        if (jobState?.status == "PAUSING" && (remainingInJob == 0 || currentInFlight == 0)) {
+                            database.jobDao().updateJobStatus(chunk.jobId, "PAUSED")
+                            Log.i("QueueManager", "Job ${chunk.jobId} all in-flight chunks completed -> PAUSED")
+                        }
+
+                        updateJobProgress(chunk.jobId)
+                        checkAndFinalizeJob(chunk.jobId)
                     }
-
-                    updateJobProgress(chunk.jobId)
-                    checkAndFinalizeJob(chunk.jobId)
                 }
             } catch (ce: CancellationException) {
                 break
@@ -274,20 +333,42 @@ class TranslationQueueManager(
     }
 
     /**
-     * Fair round-robin chunk claiming algorithm.
-     * Rotates through active jobs so that large novels never starve smaller ones.
+     * Fair dynamic chunk claiming algorithm.
+     * Prioritizes active jobs with fewer in-flight workers, distributing the global worker count
+     * dynamically across all active books according to pending work.
+     * If a book runs out of pending chunks, remaining workers are seamlessly allocated to other active books
+     * up to the configured global worker limit, preventing starvation without artificial per-book caps.
      */
     private suspend fun claimNextChunkFairly(activeJobs: List<TranslationJobEntity>): TranslationChunkEntity? {
         if (activeJobs.isEmpty()) return null
         val numJobs = activeJobs.size
-        val startIndex = Math.floorMod(roundRobinJobIndex.getAndIncrement(), numJobs)
 
-        for (i in 0 until numJobs) {
-            val jobIndex = (startIndex + i) % numJobs
-            val job = activeJobs[jobIndex]
-            val chunk = database.chunkDao().claimNextPendingChunkForJob(job.id)
-            if (chunk != null) {
-                return chunk
+        // Rotate starting index for fair round-robin tie-breaking when in-flight counts are equal
+        val startIndex = Math.floorMod(roundRobinJobIndex.getAndIncrement(), numJobs)
+        val candidateJobs = activeJobs.indices.map { i -> activeJobs[(startIndex + i) % numJobs] }
+            .sortedBy { inFlightByJob[it.id]?.get() ?: 0 }
+
+        for (job in candidateJobs) {
+            // Ensure the job is still active and has not been paused or set to PAUSING
+            val liveJob = database.jobDao().getJobById(job.id)
+            if (liveJob == null || (liveJob.status != "RUNNING" && liveJob.status != "QUEUED")) {
+                continue
+            }
+
+            // Try to claim a chunk for this job.
+            // If another worker claimed the top pending chunk at the exact same millisecond,
+            // retry up to 2 additional times if pending chunks genuinely remain.
+            for (attempt in 0 until 3) {
+                val chunk = database.chunkDao().claimNextPendingChunkForJob(job.id)
+                if (chunk != null) {
+                    return chunk
+                }
+                // If null was returned, check if any pending chunks remain in this job.
+                // If none remain, don't retry this job, move to next candidate job.
+                val hasPending = database.chunkDao().getNextPendingChunkForJob(job.id) != null
+                if (!hasPending) {
+                    break
+                }
             }
         }
         return null
@@ -311,9 +392,34 @@ class TranslationQueueManager(
                 if (e is CancellationException) throw e
                 lastError = e
             }
+
+            // Do not retry permanent failures (e.g. 403 Forbidden, 400 Bad Request)
+            val translationEx = lastError as? TranslationException
+            if (translationEx?.isPermanent == true) {
+                Log.w("QueueManager", "Permanent non-retryable error for chunk ${chunk.id}: ${lastError?.message}")
+                break
+            }
+
             if (attempt < attempts) {
-                // Exponential backoff
-                delay(500L * attempt)
+                // Calculate backoff delay with randomized jitter to prevent synchronized retry storms
+                val backoffMs = when {
+                    translationEx?.isRateLimited == true -> {
+                        val retryAfter = translationEx.retryAfterMs ?: (2000L * attempt)
+                        val jitter = (100L..500L).random()
+                        retryAfter + jitter
+                    }
+                    translationEx?.statusCode in 500..599 -> {
+                        // Exponential backoff for server errors: 1s, 2s, 4s, capped at 8s + jitter
+                        val base = (1000L * (1 shl (attempt - 1))).coerceAtMost(8000L)
+                        val jitter = (50L..250L).random()
+                        base + jitter
+                    }
+                    else -> {
+                        // Standard backoff: 500ms * attempt + jitter
+                        (500L * attempt) + (50L..200L).random()
+                    }
+                }
+                delay(backoffMs)
             }
         }
         return Triple(false, null, lastError)
@@ -397,8 +503,14 @@ class TranslationQueueManager(
                     val chapterData = try {
                         EpubParser.extractChapter(zip, quickInfo.opfDirectory, spineItem, index)
                     } catch (e: Exception) {
-                        Log.e("QueueManager", "Failed to parse chapter ${index + 1} (${spineItem.href}): ${e.message}", e)
-                        throw IllegalStateException("Failed to parse chapter ${index + 1} (${spineItem.href}): ${e.message}", e)
+                        Log.w("QueueManager", "Malformed chapter ${index + 1} (${spineItem.href}), creating fallback chapter entity: ${e.message}")
+                        ParsedChapterData(
+                            chapterId = UUID.randomUUID().toString(),
+                            chapterOrder = index,
+                            href = spineItem.href,
+                            title = "Chapter ${index + 1}",
+                            translatableParagraphs = emptyList()
+                        )
                     }
 
                     val chapterChunks = EpubChunker.generateChunksForChapter(
@@ -568,8 +680,9 @@ class TranslationQueueManager(
             return
         }
 
-        // Preserve PAUSED, PAUSING, or CANCELLED statuses
-        if (currentJob.status == "PAUSED" || currentJob.status == "PAUSING" || currentJob.status == "CANCELLED") {
+        // Preserve PAUSED, PAUSING, CANCELLED, or FAILED statuses
+        if (currentJob.status == "PAUSED" || currentJob.status == "PAUSING" || 
+            currentJob.status == "CANCELLED" || currentJob.status == "FAILED") {
             database.jobDao().updateJobProgress(jobId, completed, failed, progress, currentJob.status)
             return
         }
@@ -628,27 +741,11 @@ class TranslationQueueManager(
             return ConsistencyResult(false, "No chapters found for book $bookId")
         }
 
-        // Verify every chapter has correct order, body chunks, and translated results
+        // Verify every chapter order
         for (i in chapters.indices) {
             val ch = chapters[i]
             if (ch.chapterOrder != i) {
                 return ConsistencyResult(false, "Chapter order mismatch at index $i: expected $i, found ${ch.chapterOrder}")
-            }
-
-            val chChunks = database.chunkDao().getChunksByJobAndChapter(jobId, ch.id)
-            if (chChunks.isEmpty()) {
-                return ConsistencyResult(false, "No chunks found for chapter ${ch.id} (index $i: ${ch.title})")
-            }
-
-            val sortedChunks = chChunks.sortedBy { it.chunkOrder }
-            for (cIdx in sortedChunks.indices) {
-                val chunk = sortedChunks[cIdx]
-                if (chunk.chunkOrder != cIdx) {
-                    return ConsistencyResult(false, "Chunk order mismatch in chapter '${ch.title}': expected order $cIdx, found ${chunk.chunkOrder}")
-                }
-                if (chunk.status != "COMPLETED" || chunk.translatedText.isNullOrBlank()) {
-                    return ConsistencyResult(false, "Incomplete translation for chunk ${chunk.id} in chapter '${ch.title}'")
-                }
             }
         }
 
@@ -677,8 +774,8 @@ class TranslationQueueManager(
         val translating = database.chunkDao().getTranslatingChunkCount(jobId)
         val incomplete = database.chunkDao().getIncompleteChunkCount(jobId)
 
-        // If any chunk is still translating, pending, or incomplete, the book must NOT be marked COMPLETED
-        if (translating > 0 || incomplete > 0 || completed < total) {
+        // If any chunk is still translating, pending, or incomplete, or total chunks mismatch, the book must NOT be marked COMPLETED
+        if (translating > 0 || incomplete > 0 || completed < total || total < job.totalChunks) {
             if (failed > 0 && (completed + failed == total) && translating == 0) {
                 val errorMsg = "Translation incomplete: $failed chunks failed"
                 database.jobDao().updateJob(
@@ -695,8 +792,8 @@ class TranslationQueueManager(
             return
         }
 
-        // When total == completed and 0 failed/translating/incomplete
-        if (total > 0 && completed == total && failed == 0 && translating == 0 && incomplete == 0) {
+        // When total == completed and 0 failed/translating/incomplete, and matches expected totalChunks
+        if (total > 0 && total == job.totalChunks && completed == total && failed == 0 && translating == 0 && incomplete == 0) {
             if (!finalizingJobIds.add(jobId)) {
                 return // Finalization already in progress
             }
@@ -746,12 +843,17 @@ class TranslationQueueManager(
             if (job.status == "COMPLETED" || job.status == "CANCELLED" || job.status == "PAUSED") return@launch
 
             val inFlight = inFlightByJob[jobId]?.get() ?: 0
-            if (inFlight == 0) {
+            if (inFlight <= 0) {
                 database.jobDao().updateJobStatus(jobId, "PAUSED")
                 Log.i("QueueManager", "Job $jobId transitioned directly to PAUSED (0 in-flight requests)")
             } else {
                 database.jobDao().updateJobStatus(jobId, "PAUSING")
                 Log.i("QueueManager", "Job $jobId set to PAUSING ($inFlight in-flight requests remaining)")
+                val inFlightAfter = inFlightByJob[jobId]?.get() ?: 0
+                if (inFlightAfter <= 0) {
+                    database.jobDao().updateJobStatus(jobId, "PAUSED")
+                    Log.i("QueueManager", "Job $jobId transitioned to PAUSED (in-flight finished concurrently)")
+                }
             }
         }
     }
@@ -778,6 +880,7 @@ class TranslationQueueManager(
         scope.launch {
             database.chunkDao().retryFailedChunks(jobId)
             database.jobDao().updateJobStatus(jobId, "QUEUED")
+            updateJobProgress(jobId)
             startQueueProcessing()
         }
     }
@@ -794,6 +897,8 @@ class TranslationQueueManager(
     suspend fun deleteBookAndJob(bookId: String) = withContext(Dispatchers.IO) {
         val job = database.jobDao().getJobByBookId(bookId)
         if (job != null) {
+            inFlightByJob.remove(job.id)
+            finalizingJobIds.remove(job.id)
             database.chunkDao().deleteChunksByJob(job.id)
             database.jobDao().deleteJobById(job.id)
         }

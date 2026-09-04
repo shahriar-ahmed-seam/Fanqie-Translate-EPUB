@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
@@ -63,9 +64,10 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainApp(viewModel: MainViewModel) {
     val context = LocalContext.current
-    var currentScreen by remember { mutableStateOf(Screen.HOME) }
-    var selectedBookIdForDetail by remember { mutableStateOf<String?>(null) }
-    var activeReaderChapter by remember { mutableStateOf<Pair<String, String>?>(null) } // bookId to chapterId
+    var currentScreen by rememberSaveable { mutableStateOf(Screen.HOME) }
+    var selectedBookIdForDetail by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeReaderBookId by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeReaderChapterId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -112,13 +114,15 @@ fun MainApp(viewModel: MainViewModel) {
         exportLauncher.launch(exportFileName)
     }
 
-    if (activeReaderChapter != null) {
-        val (bId, chId) = activeReaderChapter!!
+    if (activeReaderBookId != null && activeReaderChapterId != null) {
         ReaderScreen(
-            bookId = bId,
-            initialChapterId = chId,
+            bookId = activeReaderBookId!!,
+            initialChapterId = activeReaderChapterId!!,
             viewModel = viewModel,
-            onNavigateBack = { activeReaderChapter = null }
+            onNavigateBack = {
+                activeReaderChapterId = null
+                activeReaderBookId = null
+            }
         )
     } else if (selectedBookIdForDetail != null) {
         NovelDetailScreen(
@@ -126,7 +130,8 @@ fun MainApp(viewModel: MainViewModel) {
             viewModel = viewModel,
             onNavigateBack = { selectedBookIdForDetail = null },
             onOpenReader = { chId ->
-                activeReaderChapter = Pair(selectedBookIdForDetail!!, chId)
+                activeReaderBookId = selectedBookIdForDetail
+                activeReaderChapterId = chId
             }
         )
     } else {

@@ -131,6 +131,7 @@ class AppUpdateManager(private val context: Context) {
             return raw.trim()
                 .removePrefix("v")
                 .removePrefix("V")
+                .trim()
                 .substringBefore("-")
                 .substringBefore("+")
                 .trim()
@@ -141,8 +142,12 @@ class AppUpdateManager(private val context: Context) {
             val cleanCurrent = normalizeVersion(currentVersion)
             if (cleanRemote.isBlank() || cleanCurrent.isBlank()) return false
 
-            val remoteParts = cleanRemote.split(".").map { it.toIntOrNull() ?: 0 }
-            val currentParts = cleanCurrent.split(".").map { it.toIntOrNull() ?: 0 }
+            val remoteParts = cleanRemote.split(".").map { part ->
+                part.filter { it.isDigit() }.toIntOrNull() ?: 0
+            }
+            val currentParts = cleanCurrent.split(".").map { part ->
+                part.filter { it.isDigit() }.toIntOrNull() ?: 0
+            }
 
             val maxLen = maxOf(remoteParts.size, currentParts.size)
             for (i in 0 until maxLen) {

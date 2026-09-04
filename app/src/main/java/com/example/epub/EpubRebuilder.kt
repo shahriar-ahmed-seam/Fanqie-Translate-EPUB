@@ -363,7 +363,7 @@ object EpubRebuilder {
         zos.closeEntry()
     }
 
-    private fun rebuildChapterXhtml(
+    fun rebuildChapterXhtml(
         rawXhtml: String,
         translatedTitle: String,
         chapterChunks: List<TranslationChunkEntity>
@@ -395,29 +395,36 @@ object EpubRebuilder {
             }
         }
 
-        // 3. Replace text in existing paragraph elements without deleting structure or images
-        val pElements = doc.select("p, blockquote, li, dt, dd")
-        if (pElements.isNotEmpty() && translatedParagraphs.isNotEmpty()) {
-            val limit = minOf(pElements.size, translatedParagraphs.size)
+        // 3. Replace text in content paragraph elements without destroying images/media
+        // Separate pure text elements from media elements (e.g. elements containing <img>, <svg>, <image>)
+        val candidateElements = doc.select("p, blockquote, li, dt, dd")
+        val contentElements = candidateElements.filter { element ->
+            element.select("img, svg, image").isEmpty()
+        }
+
+        if (contentElements.isNotEmpty() && translatedParagraphs.isNotEmpty()) {
+            val limit = minOf(contentElements.size, translatedParagraphs.size)
             for (i in 0 until limit) {
-                pElements[i].text(translatedParagraphs[i])
+                contentElements[i].text(translatedParagraphs[i])
             }
-            // Append extra paragraphs if translation generated more paragraphs than original elements
-            if (translatedParagraphs.size > pElements.size) {
-                val targetContainer = pElements.lastOrNull()?.parent() ?: doc.body()
-                if (targetContainer != null) {
-                    for (i in pElements.size until translatedParagraphs.size) {
-                        targetContainer.appendElement("p").text(translatedParagraphs[i])
-                    }
+
+            // If translated text generated more paragraphs than existing elements, append them
+            if (translatedParagraphs.size > contentElements.size) {
+                val targetContainer = contentElements.lastOrNull()?.parent() ?: doc.body()
+                for (i in contentElements.size until translatedParagraphs.size) {
+                    targetContainer.appendElement("p").text(translatedParagraphs[i])
+                }
+            } else if (contentElements.size > translatedParagraphs.size) {
+                // If translation produced fewer paragraphs than source elements,
+                // remove remaining surplus content elements so untranslated source Chinese text does not leak!
+                for (i in translatedParagraphs.size until contentElements.size) {
+                    contentElements[i].remove()
                 }
             }
         } else if (translatedParagraphs.isNotEmpty()) {
-            val body = doc.body()
-            if (body != null) {
-                // If there are no existing p elements, append without destroying images/illustrations
-                for (p in translatedParagraphs) {
-                    body.appendElement("p").text(p)
-                }
+            // If there are no existing pure text elements, append without destroying images/illustrations
+            for (p in translatedParagraphs) {
+                doc.body().appendElement("p").text(p)
             }
         }
 

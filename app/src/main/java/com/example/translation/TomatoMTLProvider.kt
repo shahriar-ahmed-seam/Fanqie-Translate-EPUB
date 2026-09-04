@@ -2,10 +2,15 @@ package com.example.translation
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 class TomatoMTLProvider(
@@ -14,6 +19,18 @@ class TomatoMTLProvider(
 ) : TranslationProvider {
 
     override val name: String = "TomatoMTL (Google Engine)"
+
+    companion object {
+        @Volatile
+        private var rateLimitUntil = 0L
+
+        fun setRateLimitCooldown(cooldownMs: Long) {
+            val target = System.currentTimeMillis() + cooldownMs
+            if (target > rateLimitUntil) {
+                rateLimitUntil = target
+            }
+        }
+    }
 
     // Ensure OkHttp Dispatcher allows full concurrent requests without throttling to 5
     private val dispatcher = Dispatcher().apply {
@@ -39,6 +56,12 @@ class TomatoMTLProvider(
     ): Result<String> = withContext(Dispatchers.IO) {
         if (text.isBlank()) {
             return@withContext Result.success(text)
+        }
+
+        // Shared rate limit throttle: if a recent 429 occurred, wait for the cooldown window
+        val waitMs = rateLimitUntil - System.currentTimeMillis()
+        if (waitMs > 0) {
+            delay(waitMs.coerceAtMost(15000L))
         }
 
         val sl = if (sourceLang.startsWith("zh")) "zh-CN" else sourceLang
@@ -87,6 +110,13 @@ class TomatoMTLProvider(
             return Result.success(primaryResult.getOrNull()!!)
         }
 
+        val primaryError = primaryResult.exceptionOrNull()
+        // If primary engine hit 429 rate limit or 403 blocked, do not immediately hammer fallback engine
+        if (primaryError is TranslationException && (primaryError.isRateLimited || primaryError.isPermanent)) {
+            Log.w("TomatoMTLProvider", "Primary engine non-recoverable status: ${primaryError.message}")
+            return Result.failure(primaryError)
+        }
+
         // Secondary fallback to single translation endpoint
         val secondaryResult = runCatching {
             executeFallbackEngine(text, sl, tl)
@@ -96,8 +126,8 @@ class TomatoMTLProvider(
             return Result.success(secondaryResult.getOrNull()!!)
         }
 
-        val error = primaryResult.exceptionOrNull() ?: secondaryResult.exceptionOrNull()
-        ?: IllegalStateException("Translation returned empty text from engine.")
+        val error = secondaryResult.exceptionOrNull() ?: primaryError
+        ?: TranslationException("Translation returned empty text from engine.")
 
         Log.e("TomatoMTLProvider", "Translation request failed: ${error.message}", error)
         return Result.failure(error)
@@ -122,14 +152,7 @@ class TomatoMTLProvider(
             .post(formBody)
             .build()
 
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("TomatoMTL Engine HTTP ${response.code}: ${response.message}")
-            }
-            val responseBody = response.body?.string()
-                ?: throw IllegalStateException("Empty HTTP response body")
-            return parseResponse(responseBody)
-        }
+        return executeRequestAndParse(request, "TomatoMTL Engine")
     }
 
     /**
@@ -150,18 +173,88 @@ class TomatoMTLProvider(
             .post(formBody)
             .build()
 
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("Fallback HTTP ${response.code}: ${response.message}")
+        return executeRequestAndParse(request, "Fallback Engine")
+    }
+
+    private fun executeRequestAndParse(request: Request, engineName: String): String {
+        try {
+            client.newCall(request).execute().use { response ->
+                val code = response.code
+
+                if (code == 429) {
+                    val retryAfterHeader = response.header("Retry-After")
+                    val retryAfterSec = retryAfterHeader?.toLongOrNull() ?: 3L
+                    val retryAfterMs = (retryAfterSec.coerceIn(1, 60)) * 1000L
+                    setRateLimitCooldown(retryAfterMs)
+                    throw TranslationException(
+                        message = "$engineName HTTP 429: Too Many Requests (Rate Limited)",
+                        statusCode = 429,
+                        isRateLimited = true,
+                        retryAfterMs = retryAfterMs
+                    )
+                }
+
+                if (code == 403) {
+                    throw TranslationException(
+                        message = "$engineName HTTP 403: Forbidden (Request Blocked)",
+                        statusCode = 403,
+                        isPermanent = true
+                    )
+                }
+
+                if (code == 408) {
+                    throw TranslationException(
+                        message = "$engineName HTTP 408: Request Timeout",
+                        statusCode = 408
+                    )
+                }
+
+                if (code in 500..599) {
+                    throw TranslationException(
+                        message = "$engineName HTTP $code: Server Error (${response.message})",
+                        statusCode = code
+                    )
+                }
+
+                if (!response.isSuccessful) {
+                    val isPermanent = code in 400..499 && code != 408 && code != 429
+                    throw TranslationException(
+                        message = "$engineName HTTP $code: ${response.message}",
+                        statusCode = code,
+                        isPermanent = isPermanent
+                    )
+                }
+
+                val responseBody = response.body?.string()
+                if (responseBody.isNullOrBlank()) {
+                    throw TranslationException("Empty HTTP response body from $engineName", statusCode = code)
+                }
+
+                return parseResponse(responseBody)
             }
-            val responseBody = response.body?.string()
-                ?: throw IllegalStateException("Empty HTTP response body")
-            return parseResponse(responseBody)
+        } catch (e: TranslationException) {
+            throw e
+        } catch (e: SocketTimeoutException) {
+            throw TranslationException("Socket timeout: ${e.message}", statusCode = 408, cause = e)
+        } catch (e: UnknownHostException) {
+            throw TranslationException("DNS failure (cannot resolve host): ${e.message}", cause = e)
+        } catch (e: ConnectException) {
+            throw TranslationException("Connection failure: ${e.message}", cause = e)
+        } catch (e: IOException) {
+            throw TranslationException("Network I/O error: ${e.message}", cause = e)
         }
     }
 
     private fun parseResponse(responseBody: String): String {
         val trimmed = responseBody.trim()
+
+        if (trimmed.isEmpty() || 
+            trimmed.startsWith("<html", ignoreCase = true) || 
+            trimmed.startsWith("<!doctype", ignoreCase = true) ||
+            trimmed.startsWith("<head", ignoreCase = true)) {
+            throw TranslationException("Empty or invalid HTML error response from translation engine")
+        }
+
         if (trimmed.startsWith("[")) {
             val jsonArray = JSONArray(trimmed)
             val sb = StringBuilder()
@@ -180,26 +273,30 @@ class TomatoMTLProvider(
                     }
                 }
             }
-            val res = sb.toString()
+            val res = sb.toString().trim()
             if (res.isNotBlank()) return res
         } else if (trimmed.startsWith("{")) {
             val json = JSONObject(trimmed)
-            when {
-                json.has("translatedText") -> return json.getString("translatedText")
-                json.has("translation") -> return json.getString("translation")
-                json.has("result") -> return json.getString("result")
+            val extracted = when {
+                json.has("translatedText") -> json.getString("translatedText")
+                json.has("translation") -> json.getString("translation")
+                json.has("result") -> json.getString("result")
                 json.has("data") -> {
                     val data = json.get("data")
-                    if (data is String) return data
-                    if (data is JSONObject && data.has("translatedText")) return data.getString("translatedText")
+                    if (data is String) data
+                    else if (data is JSONObject && data.has("translatedText")) data.getString("translatedText")
+                    else null
                 }
+                else -> null
             }
+            if (!extracted.isNullOrBlank()) return extracted.trim()
         }
 
         if (trimmed.isNotBlank() && !trimmed.startsWith("<")) {
             return trimmed
         }
 
-        throw IllegalStateException("Translation returned empty or invalid response")
+        throw TranslationException("Translation returned empty or invalid response")
     }
 }
+

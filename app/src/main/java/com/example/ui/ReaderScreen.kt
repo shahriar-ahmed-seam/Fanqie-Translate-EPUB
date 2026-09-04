@@ -2,16 +2,17 @@ package com.example.ui
 
 import android.content.Context
 import androidx.compose.animation.*
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,11 +30,22 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.db.AppDatabase
 import com.example.data.db.ChapterEntity
 import com.example.data.db.TranslationChunkEntity
+import com.example.data.repository.SettingsRepository
+import com.example.tts.ReaderTtsManager
+import com.example.tts.TtsState
+import com.example.tts.TtsVoiceInfo
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.material.icons.automirrored.filled.VolumeMute
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,7 +57,7 @@ enum class ReaderTheme(val label: String, val bg: Color, val text: Color) {
     DARK("Dark", Color(0xFF121212), Color(0xFFE0E0E0))
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ReaderScreen(
     bookId: String,
@@ -56,8 +69,66 @@ fun ReaderScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val db = remember { AppDatabase.getInstance(context) }
+    val settingsRepo = remember { SettingsRepository(context) }
 
-    var currentChapterId by remember { mutableStateOf(initialChapterId) }
+    val ttsManager = remember(context) { ReaderTtsManager(context) }
+    DisposableEffect(ttsManager) {
+        onDispose {
+            ttsManager.release()
+        }
+    }
+
+    // Lifecycle observer to pause safely on background and restore state when returning
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, ttsManager) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    ttsManager.onAppBackgrounded()
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    ttsManager.onAppForegrounded()
+                }
+                Lifecycle.Event.ON_DESTROY -> {
+                    ttsManager.release()
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val isTtsEnabled by ttsManager.isTtsEnabled.collectAsState()
+    val ttsState by ttsManager.ttsState.collectAsState()
+    val currentTtsParaIndex by ttsManager.currentParagraphIndex.collectAsState()
+    val speechRate by ttsManager.speechRate.collectAsState()
+    val availableVoices by ttsManager.availableVoices.collectAsState()
+    val selectedVoice by ttsManager.selectedVoice.collectAsState()
+    val ttsErrorMessage by ttsManager.errorMessage.collectAsState()
+
+    // Restore persisted settings into TTS manager on first composition
+    LaunchedEffect(Unit) {
+        ttsManager.setTtsEnabled(settingsRepo.isTtsEnabled())
+        ttsManager.setSpeechRate(settingsRepo.getTtsSpeechRate())
+        val savedVoice = settingsRepo.getTtsVoiceId()
+        if (savedVoice != null) {
+            ttsManager.savedVoiceId = savedVoice
+            ttsManager.selectVoiceById(savedVoice)
+        }
+    }
+
+    var showTtsControls by rememberSaveable { mutableStateOf(false) }
+    var showVoiceSelectionSheet by remember { mutableStateOf(false) }
+
+    var autoAdvanceChapter by rememberSaveable {
+        mutableStateOf(settingsRepo.isTtsAutoAdvanceChapterEnabled())
+    }
+    var shouldContinueTtsOnNextChapter by remember { mutableStateOf(false) }
+
+    var currentChapterId by rememberSaveable(bookId) { mutableStateOf(initialChapterId) }
     val chapters by db.chapterDao().observeChaptersByBook(bookId).collectAsState(initial = emptyList())
     val currentChapter = chapters.firstOrNull { it.id == currentChapterId }
 
@@ -70,29 +141,68 @@ fun ReaderScreen(
     var paragraphs by remember { mutableStateOf<List<String>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
 
-    // Load translated chapter titles map for TOC and header
+    var novelTitle by remember { mutableStateOf("") }
+
+    // Synchronize autoAdvanceChapter setting with TTS manager and persistent storage
+    LaunchedEffect(autoAdvanceChapter) {
+        ttsManager.setAutoAdvanceChapter(autoAdvanceChapter)
+        settingsRepo.setTtsAutoAdvanceChapterEnabled(autoAdvanceChapter)
+    }
+
+    // Connect chapter completion to advance to next chapter when enabled
+    LaunchedEffect(nextChapter) {
+        ttsManager.onChapterComplete = {
+            if (nextChapter != null) {
+                shouldContinueTtsOnNextChapter = true
+                currentChapterId = nextChapter.id
+            } else {
+                ttsManager.stop()
+            }
+        }
+    }
+
+    // Synchronize if parent initialChapterId changes
+    LaunchedEffect(initialChapterId) {
+        if (initialChapterId.isNotBlank() && initialChapterId != currentChapterId) {
+            currentChapterId = initialChapterId
+        }
+    }
+
+    val listState = rememberLazyListState()
+    val tocListState = rememberLazyListState()
+
+    // Auto-scroll to active TTS paragraph during playback and persist reading position
+    LaunchedEffect(currentTtsParaIndex, ttsState) {
+        if (ttsState == TtsState.PLAYING && currentTtsParaIndex in paragraphs.indices) {
+            listState.animateScrollToItem((currentTtsParaIndex + 1).coerceAtMost(paragraphs.size))
+            viewModel.setLastReadParagraphIndex(bookId, currentChapterId, currentTtsParaIndex)
+        }
+    }
+
+    // Load translated chapter titles map and novel title for TOC and header
     LaunchedEffect(bookId) {
         withContext(Dispatchers.IO) {
+            val book = db.bookDao().getBookById(bookId)
+            val titleChunk = db.chunkDao().getTitleChunkByBook(bookId)
+            novelTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: book?.title ?: ""
+
             val titleChunks = db.chunkDao().getChapterTitlesByBook(bookId)
             chapterTitlesMap = titleChunks.associate { it.chapterId to (it.translatedText ?: "") }
         }
     }
 
-    // Reader Customization State
-    var fontSize by remember { mutableFloatStateOf(17f) }
-    var lineSpacingMultiplier by remember { mutableFloatStateOf(1.5f) }
-    var selectedTheme by remember { mutableStateOf(ReaderTheme.SYSTEM) }
+    // Reader Customization State - preserved across configuration changes
+    var fontSize by rememberSaveable { mutableFloatStateOf(17f) }
+    var lineSpacingMultiplier by rememberSaveable { mutableFloatStateOf(1.5f) }
+    var selectedTheme by rememberSaveable { mutableStateOf(ReaderTheme.SYSTEM) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showChapterPickerSheet by remember { mutableStateOf(false) }
-
-    val scrollState = rememberScrollState()
-    val tocListState = rememberLazyListState()
 
     // Load translated chapter content whenever currentChapterId changes
     LaunchedEffect(currentChapterId) {
         isLoading = true
-        scrollState.scrollTo(0)
         viewModel.setLastReadChapterId(bookId, currentChapterId)
+        val savedPara = viewModel.getLastReadParagraphIndex(bookId, currentChapterId)
 
         withContext(Dispatchers.IO) {
             val job = db.jobDao().getJobByBookId(bookId)
@@ -106,15 +216,17 @@ fun ReaderScreen(
                 }
 
                 val titleChunk = chunks.firstOrNull { it.chunkType == "CHAPTER_TITLE" }
-                val resolvedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() } ?: chapter.title
+                val resolvedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() }
+                    ?: chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() }
+                    ?: if (chapter.title.any { it.code in 0x4e00..0x9fff }) "Chapter ${chapter.chapterOrder + 1}" else chapter.title
                 chapterTitle = resolvedTitle
 
                 val bodyChunks = chunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
                 if (bodyChunks.isNotEmpty()) {
                     val extractedParagraphs = mutableListOf<String>()
                     for (chunk in bodyChunks) {
-                        val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: chunk.sourceText
-                        // Split into natural clean paragraphs
+                        // Strict requirement: Only translated English text is displayed. Never fall back to Chinese source text.
+                        val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: continue
                         val rawParas = text.split(Regex("(\r?\n)+|<p[^>]*>|</p>|<br\\s*/?>"))
                         for (p in rawParas) {
                             val clean = p.replace(Regex("<[^>]+>"), "").trim()
@@ -123,14 +235,46 @@ fun ReaderScreen(
                             }
                         }
                     }
-                    paragraphs = extractedParagraphs
+                    if (extractedParagraphs.isNotEmpty()) {
+                        paragraphs = extractedParagraphs
+                    } else {
+                        paragraphs = listOf("This chapter has not been translated yet. Please wait for translation to complete.")
+                    }
                 } else {
-                    // Fallback to chapter title
-                    paragraphs = listOf("This chapter is queued for translation or empty.")
+                    paragraphs = listOf("This chapter has not been translated yet. Please wait for translation to complete.")
                 }
             }
         }
         isLoading = false
+
+        val resumeTts = shouldContinueTtsOnNextChapter
+        shouldContinueTtsOnNextChapter = false
+
+        val startPara = if (resumeTts) 0 else savedPara
+        ttsManager.setChapterAndParagraphs(
+            chapterId = currentChapterId,
+            newParagraphs = paragraphs,
+            continuePlaying = resumeTts,
+            startIndex = startPara
+        )
+
+        if (!resumeTts && savedPara > 0 && savedPara < paragraphs.size) {
+            // item 0 is the chapter title header, so paragraph index starts at item 1
+            listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
+        } else {
+            listState.scrollToItem(0)
+        }
+    }
+
+    // Persist reading paragraph position
+    LaunchedEffect(listState, currentChapterId) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { itemIndex ->
+                if (!isLoading && paragraphs.isNotEmpty()) {
+                    val paraIndex = (itemIndex - 1).coerceAtLeast(0)
+                    viewModel.setLastReadParagraphIndex(bookId, currentChapterId, paraIndex)
+                }
+            }
     }
 
     LaunchedEffect(showChapterPickerSheet) {
@@ -141,7 +285,7 @@ fun ReaderScreen(
 
     val displayHeaderTitle = chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() }
         ?: chapterTitle.takeIf { it.isNotBlank() }
-        ?: currentChapter?.title
+        ?: currentChapter?.let { if (it.title.any { c -> c.code in 0x4e00..0x9fff }) "Chapter ${it.chapterOrder + 1}" else it.title }
         ?: "Chapter ${currentChapterIndex + 1}"
 
     val contentBgColor = if (selectedTheme == ReaderTheme.SYSTEM) MaterialTheme.colorScheme.background else selectedTheme.bg
@@ -151,11 +295,31 @@ fun ReaderScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = displayHeaderTitle,
-                        maxLines = 1,
-                        style = MaterialTheme.typography.titleMedium
-                    )
+                    Column {
+                        if (novelTitle.isNotBlank()) {
+                            Text(
+                                text = novelTitle,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = displayHeaderTitle,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        } else {
+                            Text(
+                                text = displayHeaderTitle,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.titleMedium,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(
@@ -166,6 +330,25 @@ fun ReaderScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            if (!isTtsEnabled) {
+                                ttsManager.setTtsEnabled(true)
+                                settingsRepo.setTtsEnabled(true)
+                                showTtsControls = true
+                            } else {
+                                showTtsControls = !showTtsControls
+                            }
+                        },
+                        modifier = Modifier.testTag("reader_tts_toggle_button")
+                    ) {
+                        Icon(
+                            imageVector = if (!isTtsEnabled) Icons.AutoMirrored.Filled.VolumeMute else if (showTtsControls || ttsState == TtsState.PLAYING) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeMute,
+                            contentDescription = if (!isTtsEnabled) "Enable Text to Speech" else "Text to Speech Controls",
+                            tint = if (!isTtsEnabled) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f) else if (ttsState == TtsState.PLAYING) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                        )
+                    }
+
                     IconButton(
                         onClick = { showChapterPickerSheet = true },
                         modifier = Modifier.testTag("reader_toc_button")
@@ -183,51 +366,336 @@ fun ReaderScreen(
             )
         },
         bottomBar = {
-            Surface(
-                tonalElevation = 3.dp,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            Column(modifier = Modifier.fillMaxWidth()) {
+                AnimatedVisibility(
+                    visible = showTtsControls,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
                 ) {
-                    FilledTonalButton(
-                        onClick = {
-                            if (prevChapter != null) {
-                                currentChapterId = prevChapter.id
-                            }
-                        },
-                        enabled = prevChapter != null,
-                        modifier = Modifier.testTag("reader_prev_chapter_button")
+                    Surface(
+                        tonalElevation = 6.dp,
+                        shadowElevation = 8.dp,
+                        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Prev")
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            // Status bar & voice/speed controls
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.weight(1f, fill = false)
+                                ) {
+                                    val statusText = when {
+                                        !isTtsEnabled -> "Text-to-Speech disabled"
+                                        ttsState == TtsState.INITIALIZING -> "Connecting speech engine..."
+                                        ttsState == TtsState.PLAYING -> "Reading paragraph ${currentTtsParaIndex + 1} of ${paragraphs.size}"
+                                        ttsState == TtsState.PAUSED -> "Paused at paragraph ${currentTtsParaIndex + 1} of ${paragraphs.size}"
+                                        ttsState == TtsState.STOPPED -> "Stopped"
+                                        ttsState == TtsState.IDLE -> if (paragraphs.isNotEmpty()) "Ready to read (${paragraphs.size} paras)" else "No paragraphs to read"
+                                        ttsState == TtsState.ERROR -> ttsErrorMessage ?: "Speech engine unavailable"
+                                        else -> "Ready"
+                                    }
+                                    val statusColor = when {
+                                        !isTtsEnabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                        ttsState == TtsState.PLAYING -> MaterialTheme.colorScheme.primary
+                                        ttsState == TtsState.PAUSED -> MaterialTheme.colorScheme.tertiary
+                                        ttsState == TtsState.ERROR -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(statusColor)
+                                    )
+                                    Text(
+                                        text = statusText,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = statusColor,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    // TTS Master Enable/Disable button
+                                    IconButton(
+                                        onClick = {
+                                            val next = !isTtsEnabled
+                                            ttsManager.setTtsEnabled(next)
+                                            settingsRepo.setTtsEnabled(next)
+                                        },
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .testTag("reader_tts_master_toggle")
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isTtsEnabled) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeMute,
+                                            contentDescription = if (isTtsEnabled) "Disable Text to Speech" else "Enable Text to Speech",
+                                            modifier = Modifier.size(20.dp),
+                                            tint = if (isTtsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                        )
+                                    }
+
+                                    // Auto-advance chapter toggle button
+                                    IconButton(
+                                        onClick = { autoAdvanceChapter = !autoAdvanceChapter },
+                                        enabled = isTtsEnabled,
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .testTag("reader_tts_auto_advance_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = if (autoAdvanceChapter) Icons.Default.Repeat else Icons.Default.RepeatOne,
+                                            contentDescription = if (autoAdvanceChapter) "Continuous Chapter Play: On" else "Continuous Chapter Play: Off",
+                                            modifier = Modifier.size(20.dp),
+                                            tint = if (autoAdvanceChapter && isTtsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { showVoiceSelectionSheet = true },
+                                        enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING,
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .testTag("reader_tts_voice_button")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.RecordVoiceOver,
+                                            contentDescription = "Select Voice",
+                                            modifier = Modifier.size(20.dp),
+                                            tint = if (selectedVoice != null && isTtsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                        )
+                                    }
+
+                                    var showSpeedMenu by remember { mutableStateOf(false) }
+                                    Box {
+                                        FilledTonalButton(
+                                            onClick = { showSpeedMenu = true },
+                                            enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING,
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier
+                                                .height(32.dp)
+                                                .testTag("reader_tts_speed_button")
+                                        ) {
+                                            Text(
+                                                text = String.format(Locale.US, "%.2gx", speechRate),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+
+                                        DropdownMenu(
+                                            expanded = showSpeedMenu,
+                                            onDismissRequest = { showSpeedMenu = false }
+                                        ) {
+                                            listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f).forEach { rate ->
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text(
+                                                            text = "${rate}x",
+                                                            fontWeight = if (speechRate == rate) FontWeight.Bold else FontWeight.Normal
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        ttsManager.setSpeechRate(rate)
+                                                        settingsRepo.setTtsSpeechRate(rate)
+                                                        showSpeedMenu = false
+                                                    },
+                                                    trailingIcon = if (speechRate == rate) {
+                                                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                                    } else null
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    IconButton(
+                                        onClick = { showTtsControls = false },
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .testTag("reader_tts_close_button")
+                                    ) {
+                                        Icon(Icons.Default.Close, contentDescription = "Hide TTS Controls", modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            }
+
+                            // Playback controls row: Prev, Play/Resume, Pause, Stop, Next
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 1. Previous Paragraph
+                                IconButton(
+                                    onClick = { ttsManager.previousParagraph() },
+                                    enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && currentTtsParaIndex > 0 && paragraphs.isNotEmpty(),
+                                    modifier = Modifier.testTag("reader_tts_prev_para_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.SkipPrevious,
+                                        contentDescription = "Previous Paragraph",
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                // 2. Play / Resume Button
+                                val isPlayOrResumeEnabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && paragraphs.isNotEmpty() && ttsState != TtsState.PLAYING
+
+                                FilledIconButton(
+                                    onClick = {
+                                        if (ttsState == TtsState.PAUSED) {
+                                            ttsManager.resume()
+                                        } else {
+                                            ttsManager.play(currentTtsParaIndex)
+                                        }
+                                    },
+                                    enabled = isPlayOrResumeEnabled,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag(if (ttsState == TtsState.PAUSED) "reader_tts_resume_button" else "reader_tts_play_button")
+                                        .testTag("reader_tts_play_pause_button"),
+                                    colors = IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = MaterialTheme.colorScheme.primary,
+                                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+                                        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = if (ttsState == TtsState.PAUSED) "Resume" else "Play",
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                // 3. Pause Button
+                                val isPauseEnabled = isTtsEnabled && ttsState == TtsState.PLAYING
+                                FilledIconButton(
+                                    onClick = { ttsManager.pause() },
+                                    enabled = isPauseEnabled,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("reader_tts_pause_button"),
+                                    colors = IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = MaterialTheme.colorScheme.primary,
+                                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+                                        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Pause,
+                                        contentDescription = "Pause",
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                // 4. Stop Button
+                                IconButton(
+                                    onClick = { ttsManager.stop() },
+                                    enabled = isTtsEnabled && (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED),
+                                    modifier = Modifier.testTag("reader_tts_stop_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Stop,
+                                        contentDescription = "Stop",
+                                        modifier = Modifier.size(26.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                // 5. Next Paragraph
+                                IconButton(
+                                    onClick = { ttsManager.nextParagraph() },
+                                    enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && currentTtsParaIndex < paragraphs.size - 1 && paragraphs.isNotEmpty(),
+                                    modifier = Modifier.testTag("reader_tts_next_para_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.SkipNext,
+                                        contentDescription = "Next Paragraph",
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
+                }
 
-                    Text(
-                        text = "${currentChapterIndex + 1} / ${chapters.size}",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    FilledTonalButton(
-                        onClick = {
-                            if (nextChapter != null) {
-                                currentChapterId = nextChapter.id
-                            }
-                        },
-                        enabled = nextChapter != null,
-                        modifier = Modifier.testTag("reader_next_chapter_button")
+                Surface(
+                    tonalElevation = 3.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Next")
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                        FilledTonalButton(
+                            onClick = {
+                                if (prevChapter != null) {
+                                    if (ttsState == TtsState.PLAYING) {
+                                        shouldContinueTtsOnNextChapter = true
+                                    }
+                                    currentChapterId = prevChapter.id
+                                }
+                            },
+                            enabled = prevChapter != null,
+                            modifier = Modifier.testTag("reader_prev_chapter_button")
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Prev")
+                        }
+
+                        Text(
+                            text = "${currentChapterIndex + 1} / ${chapters.size}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        FilledTonalButton(
+                            onClick = {
+                                if (nextChapter != null) {
+                                    if (ttsState == TtsState.PLAYING) {
+                                        shouldContinueTtsOnNextChapter = true
+                                    }
+                                    currentChapterId = nextChapter.id
+                                }
+                            },
+                            enabled = nextChapter != null,
+                            modifier = Modifier.testTag("reader_next_chapter_button")
+                        ) {
+                            Text("Next")
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
                     }
                 }
             }
@@ -245,31 +713,68 @@ fun ReaderScreen(
                     CircularProgressIndicator()
                 }
             } else {
-                Column(
+                LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(scrollState)
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy((fontSize * (lineSpacingMultiplier - 0.7f)).dp)
+                        .padding(horizontal = 20.dp),
+                    contentPadding = PaddingValues(top = 16.dp, bottom = 48.dp),
+                    verticalArrangement = Arrangement.spacedBy((fontSize * (lineSpacingMultiplier - 0.7f)).coerceAtLeast(8f).dp)
                 ) {
                     // Chapter Title Header
-                    Text(
-                        text = displayHeaderTitle,
-                        style = MaterialTheme.typography.headlineSmall.copy(
-                            fontSize = (fontSize + 5).sp,
-                            lineHeight = ((fontSize + 5) * 1.3f).sp
-                        ),
-                        fontWeight = FontWeight.Bold,
-                        color = contentTextColor,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 12.dp)
-                    )
-
-                    HorizontalDivider(color = contentTextColor.copy(alpha = 0.2f))
+                    item(key = "chapter_header") {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = displayHeaderTitle,
+                                style = MaterialTheme.typography.headlineSmall.copy(
+                                    fontSize = (fontSize + 5).sp,
+                                    lineHeight = ((fontSize + 5) * 1.3f).sp
+                                ),
+                                fontWeight = FontWeight.Bold,
+                                color = contentTextColor,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 12.dp)
+                            )
+                            HorizontalDivider(color = contentTextColor.copy(alpha = 0.2f))
+                        }
+                    }
 
                     // Paragraphs
-                    paragraphs.forEachIndexed { index, paragraph ->
+                    itemsIndexed(
+                        items = paragraphs,
+                        key = { index, _ -> "ch_${currentChapterId}_para_$index" }
+                    ) { index, paragraph ->
+                        val isTtsActive = (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) && index == currentTtsParaIndex
+                        val shape = RoundedCornerShape(8.dp)
+
+                        val paraModifier = Modifier
+                            .fillMaxWidth()
+                            .clip(shape)
+                            .then(
+                                if (isTtsActive) {
+                                    Modifier
+                                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                } else {
+                                    Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                }
+                            )
+                            .combinedClickable(
+                                onDoubleClick = {
+                                    if (isTtsEnabled) {
+                                        ttsManager.play(index)
+                                        showTtsControls = true
+                                    }
+                                },
+                                onClick = {
+                                    if (isTtsEnabled && (showTtsControls || ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED)) {
+                                        ttsManager.play(index)
+                                    }
+                                }
+                            )
+                            .testTag("reader_paragraph_$index")
+
                         Text(
                             text = paragraph,
                             style = MaterialTheme.typography.bodyLarge.copy(
@@ -277,13 +782,11 @@ fun ReaderScreen(
                                 lineHeight = (fontSize * lineSpacingMultiplier).sp,
                                 fontFamily = FontFamily.Serif
                             ),
-                            color = contentTextColor,
+                            color = if (isTtsActive && selectedTheme == ReaderTheme.SYSTEM) MaterialTheme.colorScheme.onPrimaryContainer else contentTextColor,
                             textAlign = TextAlign.Start,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = paraModifier
                         )
                     }
-
-                    Spacer(modifier = Modifier.height(32.dp))
                 }
             }
         }
@@ -374,10 +877,19 @@ fun ReaderScreen(
                     .fillMaxHeight(0.7f)
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
+                if (novelTitle.isNotBlank()) {
+                    Text(
+                        text = novelTitle,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 Text(
                     text = "Table of Contents (${chapters.size} Chapters)",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
 
@@ -389,7 +901,8 @@ fun ReaderScreen(
                     items(chapters, key = { it.id }) { chapter ->
                         val isCurrent = chapter.id == currentChapterId
                         val trTitle = chapterTitlesMap[chapter.id]?.takeIf { it.isNotBlank() }
-                        val displayChapterTitle = trTitle ?: chapter.title
+                        val displayChapterTitle = trTitle
+                            ?: if (chapter.title.any { it.code in 0x4e00..0x9fff }) "Chapter ${chapter.chapterOrder + 1}" else chapter.title
 
                         Surface(
                             shape = RoundedCornerShape(8.dp),
@@ -397,6 +910,9 @@ fun ReaderScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
+                                    if (ttsState == TtsState.PLAYING) {
+                                        shouldContinueTtsOnNextChapter = true
+                                    }
                                     currentChapterId = chapter.id
                                     showChapterPickerSheet = false
                                 }
@@ -424,7 +940,7 @@ fun ReaderScreen(
                                         color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
                                     )
 
-                                    if (trTitle != null && trTitle != chapter.title) {
+                                    if (trTitle != null && trTitle != chapter.title && !chapter.title.any { it.code in 0x4e00..0x9fff }) {
                                         Text(
                                             text = chapter.title,
                                             style = MaterialTheme.typography.bodySmall,
@@ -440,6 +956,103 @@ fun ReaderScreen(
                                         tint = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.size(18.dp)
                                     )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Voice Selection Bottom Sheet
+    if (showVoiceSelectionSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showVoiceSelectionSheet = false }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.6f)
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "Select TTS Voice",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                Text(
+                    text = "Installed system voices for reading novel chapters",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                if (availableVoices.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "No additional voice profiles exposed by Android TTS engine. The default system voice is being used.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(availableVoices, key = { it.id }) { voiceInfo ->
+                            val isSelected = selectedVoice?.id == voiceInfo.id
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        ttsManager.selectVoice(voiceInfo)
+                                        settingsRepo.setTtsVoiceId(voiceInfo.id)
+                                        showVoiceSelectionSheet = false
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.RecordVoiceOver,
+                                        contentDescription = null,
+                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = voiceInfo.displayName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = if (voiceInfo.isNetworkRequired) "Online voice" else "Device offline voice",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "Selected",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
