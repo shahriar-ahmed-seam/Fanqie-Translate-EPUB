@@ -15,6 +15,11 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
+
 data class ReleaseInfo(
     val tagName: String,
     val versionName: String,
@@ -23,34 +28,101 @@ data class ReleaseInfo(
     val isNewer: Boolean
 )
 
-class AppUpdateManager(private val context: Context) {
-
-    private val client = OkHttpClient.Builder()
+class AppUpdateManager(
+    private val context: Context,
+    private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+) {
+    @Volatile
+    private var lastCheckTimeMs: Long = 0L
+    @Volatile
+    private var lastCheckKey: String = ""
+    @Volatile
+    private var cachedReleaseInfo: ReleaseInfo? = null
+    private val cacheLock = Any()
 
-    suspend fun checkForUpdates(owner: String, repo: String): Result<ReleaseInfo?> = withContext(Dispatchers.IO) {
-        runCatching {
-            val url = "https://api.github.com/repos/$owner/$repo/releases/latest"
+    suspend fun checkForUpdates(
+        owner: String,
+        repo: String,
+        force: Boolean = false
+    ): Result<ReleaseInfo?> = withContext(Dispatchers.IO) {
+        val cleanOwner = sanitizeOwner(owner)
+        val cleanRepo = sanitizeRepo(repo)
+        val cacheKey = "$cleanOwner/$cleanRepo"
+
+        synchronized(cacheLock) {
+            val now = System.currentTimeMillis()
+            // Throttle: cache valid for 30s unless force is explicitly requested
+            if (!force && cacheKey == lastCheckKey && (now - lastCheckTimeMs) < 30_000L) {
+                return@withContext Result.success(cachedReleaseInfo)
+            }
+        }
+
+        try {
+            val url = "https://api.github.com/repos/$cleanOwner/$cleanRepo/releases/latest"
             val request = Request.Builder()
                 .url(url)
-                .header("Accept", "application/vnd.github.v3+json")
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
                 .header("User-Agent", "EPUB-Translator-Android")
                 .get()
                 .build()
 
             client.newCall(request).execute().use { response ->
-                if (response.code == 404) {
-                    return@runCatching null
-                }
                 if (!response.isSuccessful) {
-                    throw IllegalStateException("GitHub API returned ${response.code}: ${response.message}")
-                }
-                val body = response.body?.string() ?: return@runCatching null
-                val json = JSONObject(body)
+                    val errBody = runCatching { response.body?.string() }.getOrNull()
+                    val errJson = errBody?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    val apiMessage = errJson?.optString("message", "")?.trim() ?: ""
 
-                val tagName = json.optString("tag_name", "")
+                    val diagnosticMsg = when (response.code) {
+                        403 -> {
+                            val remaining = response.header("X-RateLimit-Remaining")?.toIntOrNull()
+                            if (remaining == 0 || apiMessage.contains("rate limit", ignoreCase = true)) {
+                                "GitHub API rate limit exceeded (HTTP 403). Please try again later."
+                            } else if (apiMessage.isNotBlank()) {
+                                "GitHub API forbidden (HTTP 403): $apiMessage"
+                            } else {
+                                "GitHub API access forbidden (HTTP 403)."
+                            }
+                        }
+                        404 -> {
+                            "No published releases found for repository '$cleanOwner/$cleanRepo' (HTTP 404)."
+                        }
+                        429 -> {
+                            "Too many requests to GitHub API (HTTP 429). Please wait before checking again."
+                        }
+                        in 500..599 -> {
+                            "GitHub servers are currently unavailable (HTTP ${response.code}). Please try again later."
+                        }
+                        else -> {
+                            if (apiMessage.isNotBlank()) {
+                                "GitHub API error (${response.code}): $apiMessage"
+                            } else {
+                                "GitHub API returned HTTP ${response.code}."
+                            }
+                        }
+                    }
+                    return@withContext Result.failure(IOException(diagnosticMsg))
+                }
+
+                val body = response.body?.string()
+                if (body.isNullOrBlank()) {
+                    return@withContext Result.failure(IOException("GitHub API returned an empty response body."))
+                }
+
+                val json = try {
+                    JSONObject(body)
+                } catch (e: Exception) {
+                    return@withContext Result.failure(IOException("Failed to parse GitHub release data: ${e.message}", e))
+                }
+
+                val tagName = json.optString("tag_name", "").trim()
+                if (tagName.isBlank()) {
+                    return@withContext Result.failure(IOException("Latest release does not contain a valid tag_name."))
+                }
+
                 val versionName = normalizeVersion(tagName)
                 val releaseNotes = json.optString("body", "No release notes provided.")
 
@@ -61,8 +133,11 @@ class AppUpdateManager(private val context: Context) {
                         val asset = assets.getJSONObject(i)
                         val name = asset.optString("name", "")
                         if (name.endsWith(".apk", ignoreCase = true)) {
-                            apkDownloadUrl = asset.optString("browser_download_url")
-                            break
+                            val downloadUrl = asset.optString("browser_download_url", "").trim()
+                            if (downloadUrl.isNotBlank()) {
+                                apkDownloadUrl = downloadUrl
+                                break
+                            }
                         }
                     }
                 }
@@ -70,14 +145,32 @@ class AppUpdateManager(private val context: Context) {
                 val currentVersion = BuildConfig.VERSION_NAME
                 val isNewer = isVersionNewer(versionName, currentVersion)
 
-                ReleaseInfo(
+                val releaseInfo = ReleaseInfo(
                     tagName = tagName,
                     versionName = versionName,
                     releaseNotes = releaseNotes,
                     apkDownloadUrl = apkDownloadUrl,
                     isNewer = isNewer
                 )
+
+                synchronized(cacheLock) {
+                    lastCheckTimeMs = System.currentTimeMillis()
+                    lastCheckKey = cacheKey
+                    cachedReleaseInfo = releaseInfo
+                }
+
+                Result.success(releaseInfo)
             }
+        } catch (e: UnknownHostException) {
+            Result.failure(IOException("Unable to reach GitHub. Please check your internet connection or DNS.", e))
+        } catch (e: SocketTimeoutException) {
+            Result.failure(IOException("Connection to GitHub timed out. Please check your network.", e))
+        } catch (e: SSLException) {
+            Result.failure(IOException("Secure connection (SSL/TLS) to GitHub failed: ${e.localizedMessage ?: e.message}", e))
+        } catch (e: IOException) {
+            Result.failure(e)
+        } catch (e: Exception) {
+            Result.failure(IOException(e.localizedMessage ?: e.message ?: "Unexpected error checking for updates", e))
         }
     }
 
@@ -127,6 +220,29 @@ class AppUpdateManager(private val context: Context) {
     }
 
     companion object {
+        fun sanitizeOwner(rawOwner: String): String {
+            return rawOwner.trim()
+                .removePrefix("https://github.com/")
+                .removePrefix("http://github.com/")
+                .removePrefix("github.com/")
+                .substringBefore("/")
+                .trim()
+                .ifBlank { "shahriar-ahmed-seam" }
+                .let { if (it.equals("shahriarseam", ignoreCase = true)) "shahriar-ahmed-seam" else it }
+        }
+
+        fun sanitizeRepo(rawRepo: String): String {
+            return rawRepo.trim()
+                .removePrefix("https://github.com/")
+                .removePrefix("http://github.com/")
+                .removePrefix("github.com/")
+                .substringAfterLast("/")
+                .removeSuffix(".git")
+                .trim()
+                .ifBlank { "Fanqie-Translate-EPUB" }
+                .let { if (it.equals("epub-translator", ignoreCase = true)) "Fanqie-Translate-EPUB" else it }
+        }
+
         fun normalizeVersion(raw: String): String {
             return raw.trim()
                 .removePrefix("v")

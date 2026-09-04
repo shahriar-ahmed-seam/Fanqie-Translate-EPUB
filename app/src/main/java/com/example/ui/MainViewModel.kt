@@ -342,19 +342,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _message.value = "Settings saved"
     }
 
-    fun checkForUpdates(silent: Boolean = false) {
+    fun checkForUpdates(silent: Boolean = false, force: Boolean = !silent) {
         viewModelScope.launch {
             val s = settings.value
-            val result = updateManager.checkForUpdates(s.githubOwner, s.githubRepo)
+            val result = updateManager.checkForUpdates(s.githubOwner, s.githubRepo, force = force)
             if (result.isSuccess) {
                 val info = result.getOrNull()
                 if (info != null && info.isNewer) {
                     _updateState.value = info
                 } else if (!silent) {
-                    _message.value = "You are using the latest version!"
+                    _message.value = "You are using the latest version (v${com.example.BuildConfig.VERSION_NAME})"
                 }
             } else if (!silent) {
-                _message.value = "Update check failed: ${result.exceptionOrNull()?.message}"
+                val errorMsg = result.exceptionOrNull()?.message ?: "Unknown error"
+                _message.value = "Update check failed: $errorMsg"
             }
         }
     }
