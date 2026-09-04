@@ -17,6 +17,9 @@ class TranslatorApplication : Application() {
     lateinit var queueManager: TranslationQueueManager
         private set
 
+    lateinit var ttsManager: com.example.tts.ReaderTtsManager
+        private set
+
     companion object {
         lateinit var instance: TranslatorApplication
             private set
@@ -28,6 +31,12 @@ class TranslatorApplication : Application() {
         database = AppDatabase.getInstance(this)
         settingsRepository = SettingsRepository(this)
         queueManager = TranslationQueueManager(this, database, settingsRepository)
+        ttsManager = com.example.tts.ReaderTtsManager(this).apply {
+            setTtsEnabled(settingsRepository.isTtsEnabled())
+            setSpeechRate(settingsRepository.getTtsSpeechRate())
+            setAutoAdvanceChapter(settingsRepository.isTtsAutoAdvanceChapterEnabled())
+            savedVoiceId = settingsRepository.getTtsVoiceId()
+        }
 
         // Ensure service is launched to manage background queue
         TranslationService.start(this)

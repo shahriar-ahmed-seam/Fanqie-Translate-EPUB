@@ -47,3 +47,11 @@ Thumbs.db
 # Internal scratch files & reports
 architectural_report.md
 
+# Editor & temporary files
+.vscode/
+*.swp
+*.tmp
+*.bak
+*~
+
+

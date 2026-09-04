@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -332,7 +333,7 @@ fun NovelDetailScreen(
                 if (targetChapterId != null) {
                     ExtendedFloatingActionButton(
                         onClick = { onOpenReader(targetChapterId) },
-                        icon = { Icon(Icons.Default.MenuBook, contentDescription = null) },
+                        icon = { Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null) },
                         text = { Text(if (lastReadChapterId != null) "Continue Reading" else "Start Reading") },
                         modifier = Modifier.testTag("read_fab")
                     )

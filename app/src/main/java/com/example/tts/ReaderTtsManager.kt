@@ -38,6 +38,17 @@ data class TtsVoiceInfo(
 )
 
 /**
+ * Metadata describing the active novel and chapter being read by TTS.
+ */
+data class TtsMediaMetadata(
+    val bookId: String = "",
+    val chapterId: String = "",
+    val novelTitle: String = "",
+    val chapterTitle: String = "",
+    val chapterOrder: Int = 0
+)
+
+/**
  * Interface abstracting TextToSpeech operations for clean isolation and testability.
  */
 interface TextToSpeechClient {
@@ -118,6 +129,9 @@ class ReaderTtsManager(
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    private val _mediaMetadata = MutableStateFlow(TtsMediaMetadata())
+    val mediaMetadata: StateFlow<TtsMediaMetadata> = _mediaMetadata.asStateFlow()
+
     private val _isTtsEnabled = MutableStateFlow(true)
     val isTtsEnabled: StateFlow<Boolean> = _isTtsEnabled.asStateFlow()
 
@@ -125,6 +139,8 @@ class ReaderTtsManager(
     val autoAdvanceChapter: StateFlow<Boolean> = _autoAdvanceChapter.asStateFlow()
 
     var onChapterComplete: (() -> Unit)? = null
+    var onPlaybackStarted: (() -> Unit)? = null
+    var onPositionChanged: ((paragraphIndex: Int, state: TtsState) -> Unit)? = null
 
     private var paragraphs: List<String> = emptyList()
     private var currentChapterId: String = ""
@@ -140,6 +156,9 @@ class ReaderTtsManager(
         initializeEngine()
     }
 
+    fun getParagraphs(): List<String> = paragraphs
+    fun getCurrentChapterId(): String = currentChapterId
+
     fun setTtsEnabled(enabled: Boolean) {
         _isTtsEnabled.value = enabled
         if (!enabled && (_ttsState.value == TtsState.PLAYING || _ttsState.value == TtsState.PAUSED)) {
@@ -152,19 +171,13 @@ class ReaderTtsManager(
     }
 
     fun onAppBackgrounded() {
-        if (_ttsState.value == TtsState.PLAYING) {
-            wasPlayingBeforeBackground = true
-            pause()
-        }
+        // With foreground service, background playback continues seamlessly.
+        // We notify position listeners so state is saved.
+        onPositionChanged?.invoke(_currentParagraphIndex.value, _ttsState.value)
     }
 
     fun onAppForegrounded(autoResume: Boolean = true) {
-        if (wasPlayingBeforeBackground) {
-            wasPlayingBeforeBackground = false
-            if (autoResume && _isTtsEnabled.value) {
-                resume()
-            }
-        }
+        // UI reattaches seamlessly to ongoing playback.
     }
 
     fun reinitialize(onSuccess: (() -> Unit)? = null) {
@@ -335,6 +348,22 @@ class ReaderTtsManager(
             word.lowercase().replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
         }
 
+    fun setChapterMetadata(
+        bookId: String,
+        chapterId: String,
+        novelTitle: String,
+        chapterTitle: String,
+        chapterOrder: Int
+    ) {
+        _mediaMetadata.value = TtsMediaMetadata(
+            bookId = bookId,
+            chapterId = chapterId,
+            novelTitle = novelTitle,
+            chapterTitle = chapterTitle,
+            chapterOrder = chapterOrder
+        )
+    }
+
     /**
      * Updates the chapter ID and paragraphs.
      * Optionally continues playing immediately from the specified start index.
@@ -343,15 +372,30 @@ class ReaderTtsManager(
         chapterId: String,
         newParagraphs: List<String>,
         continuePlaying: Boolean = false,
-        startIndex: Int = 0
+        startIndex: Int = 0,
+        bookId: String = _mediaMetadata.value.bookId,
+        novelTitle: String = _mediaMetadata.value.novelTitle,
+        chapterTitle: String = _mediaMetadata.value.chapterTitle,
+        chapterOrder: Int = _mediaMetadata.value.chapterOrder
     ) {
         val chapterChanged = currentChapterId != chapterId
         currentChapterId = chapterId
         paragraphs = newParagraphs
 
+        _mediaMetadata.value = TtsMediaMetadata(
+            bookId = bookId,
+            chapterId = chapterId,
+            novelTitle = novelTitle,
+            chapterTitle = chapterTitle,
+            chapterOrder = chapterOrder
+        )
+
         if (chapterChanged || startIndex != _currentParagraphIndex.value) {
             _currentParagraphIndex.value = startIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
         }
+
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
 
         if (continuePlaying && paragraphs.isNotEmpty() && _isTtsEnabled.value) {
             play(_currentParagraphIndex.value)
@@ -409,9 +453,19 @@ class ReaderTtsManager(
         if (startIndex != null) {
             _currentParagraphIndex.value = startIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
         }
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
 
         _ttsState.value = TtsState.PLAYING
-        speakCurrentParagraph()
+        try {
+            val meta = _mediaMetadata.value
+            TtsPlaybackService.start(context.applicationContext, meta.bookId, meta.chapterId)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to start TtsPlaybackService", e)
+        }
+        onPlaybackStarted?.invoke()
+        onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.PLAYING)
+        speakCurrentParagraph(0)
     }
 
     /**
@@ -427,6 +481,7 @@ class ReaderTtsManager(
                 Log.w(TAG, "Error stopping TTS on pause", e)
             }
             _ttsState.value = TtsState.PAUSED
+            onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.PAUSED)
         }
     }
 
@@ -446,12 +501,15 @@ class ReaderTtsManager(
     fun stop() {
         if (isReleased) return
         activeUtteranceId = null
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
         try {
             ttsClient?.stop()
         } catch (e: Exception) {
             Log.w(TAG, "Error stopping TTS", e)
         }
         _ttsState.value = TtsState.STOPPED
+        onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.STOPPED)
     }
 
     /**
@@ -461,10 +519,13 @@ class ReaderTtsManager(
         if (isReleased || paragraphs.isEmpty()) return
         val prevIndex = (_currentParagraphIndex.value - 1).coerceAtLeast(0)
         _currentParagraphIndex.value = prevIndex
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
+        onPositionChanged?.invoke(_currentParagraphIndex.value, _ttsState.value)
 
         if (_ttsState.value == TtsState.PLAYING) {
             activeUtteranceId = null
-            speakCurrentParagraph()
+            speakCurrentParagraph(0)
         }
     }
 
@@ -474,11 +535,14 @@ class ReaderTtsManager(
     fun nextParagraph() {
         if (isReleased || paragraphs.isEmpty()) return
         val nextIndex = _currentParagraphIndex.value + 1
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
         if (nextIndex < paragraphs.size) {
             _currentParagraphIndex.value = nextIndex
+            onPositionChanged?.invoke(_currentParagraphIndex.value, _ttsState.value)
             if (_ttsState.value == TtsState.PLAYING) {
                 activeUtteranceId = null
-                speakCurrentParagraph()
+                speakCurrentParagraph(0)
             }
         } else {
             handleChapterEnd()
@@ -494,7 +558,7 @@ class ReaderTtsManager(
         try {
             ttsClient?.setSpeechRate(clampedRate)
             if (_ttsState.value == TtsState.PLAYING) {
-                speakCurrentParagraph()
+                speakCurrentParagraph(currentSubChunkIndex)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error setting speech rate", e)
@@ -515,39 +579,78 @@ class ReaderTtsManager(
             }
         }
         if (_ttsState.value == TtsState.PLAYING) {
-            speakCurrentParagraph()
+            speakCurrentParagraph(currentSubChunkIndex)
         }
     }
 
     /**
      * Selects a TTS voice by unique voice ID.
      */
-    fun selectVoiceById(voiceId: String) {
+    fun selectVoiceById(voiceId: String?) {
         savedVoiceId = voiceId
+        if (voiceId.isNullOrBlank()) {
+            val fallback = _availableVoices.value.firstOrNull()
+            if (fallback != null) selectVoice(fallback)
+            return
+        }
         val found = _availableVoices.value.find { it.id == voiceId }
         if (found != null) {
             selectVoice(found)
+        } else {
+            val fallback = _availableVoices.value.firstOrNull()
+            if (fallback != null) selectVoice(fallback)
         }
     }
 
-    private fun speakCurrentParagraph() {
+    private var currentSubChunkIndex = 0
+    private var currentSubChunks: List<String> = emptyList()
+
+    private fun chunkLongText(text: String, maxChunkSize: Int = 2500): List<String> {
+        if (text.length <= maxChunkSize) return listOf(text)
+        val chunks = mutableListOf<String>()
+        var remaining = text
+        while (remaining.isNotEmpty()) {
+            if (remaining.length <= maxChunkSize) {
+                chunks.add(remaining)
+                break
+            }
+            val candidate = remaining.substring(0, maxChunkSize)
+            val splitIndex = candidate.lastIndexOfAny(charArrayOf('.', '!', '?', '\n', ';', ','))
+            val actualSplit = if (splitIndex > maxChunkSize / 2) {
+                splitIndex + 1
+            } else {
+                candidate.lastIndexOf(' ').takeIf { it > maxChunkSize / 2 } ?: maxChunkSize
+            }
+            chunks.add(remaining.substring(0, actualSplit).trim())
+            remaining = remaining.substring(actualSplit).trimStart()
+        }
+        return chunks.filter { it.isNotBlank() }
+    }
+
+    private fun speakCurrentParagraph(startSubChunk: Int = 0) {
         val index = _currentParagraphIndex.value
         if (index !in paragraphs.indices) {
             _ttsState.value = TtsState.STOPPED
+            onPositionChanged?.invoke(index, TtsState.STOPPED)
             return
         }
 
-        val text = paragraphs[index].trim()
-        if (text.isBlank()) {
+        val fullText = paragraphs[index].trim()
+        if (fullText.isBlank()) {
             // Skip empty paragraph automatically
             if (index < paragraphs.size - 1) {
                 _currentParagraphIndex.value = index + 1
-                speakCurrentParagraph()
+                onPositionChanged?.invoke(index + 1, TtsState.PLAYING)
+                speakCurrentParagraph(0)
             } else {
                 handleChapterEnd()
             }
             return
         }
+
+        currentSubChunks = chunkLongText(fullText)
+        currentSubChunkIndex = startSubChunk.coerceIn(0, (currentSubChunks.size - 1).coerceAtLeast(0))
+        val textToSpeak = currentSubChunks.getOrNull(currentSubChunkIndex) ?: fullText
 
         try {
             val client = ttsClient
@@ -561,14 +664,14 @@ class ReaderTtsManager(
             client.setSpeechRate(_speechRate.value)
             _selectedVoice.value?.voice?.let { client.setVoice(it) }
 
-            val utteranceId = "utt_${currentChapterId}_${index}_${++utteranceSeq}"
+            val utteranceId = "utt_${currentChapterId}_${index}_${currentSubChunkIndex}_${++utteranceSeq}"
             activeUtteranceId = utteranceId
 
             val params = Bundle().apply {
                 putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
             }
 
-            val result = client.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+            val result = client.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
             if (result != TextToSpeech.SUCCESS) {
                 Log.w(TAG, "speak() returned failure code: $result")
                 if (result == TextToSpeech.ERROR_INVALID_REQUEST || result == TextToSpeech.ERROR_SERVICE) {
@@ -596,10 +699,27 @@ class ReaderTtsManager(
         }
         activeUtteranceId = null
 
+        // If there are remaining sub-chunks for a long paragraph, speak next sub-chunk
+        if (currentSubChunkIndex < currentSubChunks.size - 1) {
+            currentSubChunkIndex++
+            val textToSpeak = currentSubChunks.getOrNull(currentSubChunkIndex) ?: ""
+            val nextUtteranceId = "utt_${currentChapterId}_${_currentParagraphIndex.value}_${currentSubChunkIndex}_${++utteranceSeq}"
+            activeUtteranceId = nextUtteranceId
+            val params = Bundle().apply {
+                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+            }
+            ttsClient?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, params, nextUtteranceId)
+            return
+        }
+
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
+
         val nextIndex = _currentParagraphIndex.value + 1
         if (nextIndex < paragraphs.size) {
             _currentParagraphIndex.value = nextIndex
-            speakCurrentParagraph()
+            onPositionChanged?.invoke(nextIndex, TtsState.PLAYING)
+            speakCurrentParagraph(0)
         } else {
             handleChapterEnd()
         }
@@ -607,6 +727,8 @@ class ReaderTtsManager(
 
     private fun handleChapterEnd() {
         activeUtteranceId = null
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
         if (_autoAdvanceChapter.value && onChapterComplete != null) {
             onChapterComplete?.invoke()
         } else {

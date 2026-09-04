@@ -453,25 +453,25 @@ class ReaderTtsManagerTest {
         manager.play(0)
         assertEquals(TtsState.PLAYING, manager.ttsState.value)
 
-        // App is backgrounded
+        // App is backgrounded - TTS playback continues uninterrupted
         manager.onAppBackgrounded()
-        assertEquals(TtsState.PAUSED, manager.ttsState.value)
-        assertTrue(fakeClient.isStopped)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertFalse(fakeClient.isStopped)
 
-        // App is foregrounded with autoResume = true (default)
+        // App is foregrounded
         manager.onAppForegrounded(autoResume = true)
         assertEquals(TtsState.PLAYING, manager.ttsState.value)
         assertEquals(0, manager.currentParagraphIndex.value)
 
-        // Pause explicitly before backgrounding
+        // Pause explicitly
         manager.pause()
         assertEquals(TtsState.PAUSED, manager.ttsState.value)
 
         manager.onAppBackgrounded()
         assertEquals(TtsState.PAUSED, manager.ttsState.value)
 
-        // Foregrounding should NOT auto-resume if user had paused before backgrounding
-        manager.onAppForegrounded(autoResume = true)
+        // Foregrounding when paused stays paused
+        manager.onAppForegrounded(autoResume = false)
         assertEquals(TtsState.PAUSED, manager.ttsState.value)
     }
 
@@ -638,5 +638,127 @@ class ReaderTtsManagerTest {
         manager.setChapterAndParagraphs("ch_2", listOf("Chapter 2 Para 1"), continuePlaying = false)
         assertEquals(TtsState.STOPPED, manager.ttsState.value)
         assertTrue(fakeClient.isStopped)
+    }
+
+    @Test
+    fun testLongParagraphChunkingAndSequentialPlayback() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Build a 4000-character paragraph
+        val longPara = "This is a very long paragraph sentence that will be repeated many times to exceed the chunk limit. ".repeat(40)
+        assertTrue(longPara.length > 3500)
+
+        manager.setChapterAndParagraphs("ch_long", listOf(longPara, "Second paragraph"), continuePlaying = false)
+        manager.play(0)
+
+        // First subchunk should be spoken
+        assertEquals(1, fakeClient.spokenTexts.size)
+        assertTrue(fakeClient.spokenTexts[0].length <= 2600)
+        val firstUttId = fakeClient.lastUtteranceId
+
+        // Complete first subchunk
+        fakeClient.listener?.onDone(firstUttId)
+        testScheduler.advanceUntilIdle()
+
+        // Second subchunk should be spoken without changing paragraph index
+        assertEquals(2, fakeClient.spokenTexts.size)
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        val secondUttId = fakeClient.lastUtteranceId
+
+        // Complete second subchunk
+        fakeClient.listener?.onDone(secondUttId)
+        testScheduler.advanceUntilIdle()
+
+        // Now it moves to the second paragraph
+        assertEquals(3, fakeClient.spokenTexts.size)
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals("Second paragraph", fakeClient.spokenTexts[2])
+    }
+
+    @Test
+    fun testRapidPlaybackNavigationDoesNotRepeatOrSkip() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        val paras = (1..10).map { "Paragraph $it" }
+        manager.setChapterAndParagraphs("ch_rapid", paras, continuePlaying = false)
+
+        manager.play(0)
+        val utt0 = fakeClient.lastUtteranceId
+
+        // Rapid next, next, prev
+        manager.nextParagraph()
+        manager.nextParagraph()
+        manager.previousParagraph()
+
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Stale callback from utt0 arrives
+        fakeClient.listener?.onDone(utt0)
+        testScheduler.advanceUntilIdle()
+
+        // Stale callback must NOT have advanced the paragraph!
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+    }
+
+    @Test
+    fun testEndOfNovelTransitionsToStoppedState() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setChapterAndParagraphs("ch_end", listOf("Last paragraph"), continuePlaying = false)
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        var chapterCompleteInvoked = false
+        manager.onChapterComplete = {
+            chapterCompleteInvoked = true
+            // No next chapter -> stop
+            manager.stop()
+        }
+
+        val lastUtt = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(lastUtt)
+        testScheduler.advanceUntilIdle()
+
+        assertTrue(chapterCompleteInvoked)
+        assertEquals(TtsState.STOPPED, manager.ttsState.value)
+    }
+
+    @Test
+    fun testVoiceFallbackWhenSelectedVoiceMissing() {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = testScope,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Attempting to select a nonexistent voice ID
+        manager.selectVoiceById("non_existent_voice_id_xyz")
+
+        // Should not crash, and should keep manager in valid state
+        assertNotEquals(TtsState.ERROR, manager.ttsState.value)
+        assertNull(manager.errorMessage.value)
     }
 }

@@ -12,8 +12,8 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,6 +40,9 @@ enum class Screen(val title: String) {
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
 
+    val pendingNotificationBookId = mutableStateOf<String?>(null)
+    val pendingNotificationChapterId = mutableStateOf<String?>(null)
+
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ -> }
@@ -48,6 +51,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        val bId = intent?.getStringExtra("extra_open_book_id")
+        val cId = intent?.getStringExtra("extra_open_chapter_id")
+        if (bId != null && cId != null) {
+            pendingNotificationBookId.value = bId
+            pendingNotificationChapterId.value = cId
+        }
+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -55,19 +65,75 @@ class MainActivity : ComponentActivity() {
         setContent {
             val settings by viewModel.settings.collectAsStateWithLifecycle()
             MyApplicationTheme(darkTheme = settings.isDarkMode) {
-                MainApp(viewModel = viewModel)
+                MainApp(
+                    viewModel = viewModel,
+                    pendingNotificationBookId = pendingNotificationBookId,
+                    pendingNotificationChapterId = pendingNotificationChapterId
+                )
             }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val bId = intent.getStringExtra("extra_open_book_id")
+        val cId = intent.getStringExtra("extra_open_chapter_id")
+        if (bId != null && cId != null) {
+            pendingNotificationBookId.value = bId
+            pendingNotificationChapterId.value = cId
         }
     }
 }
 
 @Composable
-fun MainApp(viewModel: MainViewModel) {
+fun MainApp(
+    viewModel: MainViewModel,
+    pendingNotificationBookId: MutableState<String?>? = null,
+    pendingNotificationChapterId: MutableState<String?>? = null
+) {
     val context = LocalContext.current
+    val app = context.applicationContext as? TranslatorApplication
+    val settingsRepo = remember { app?.settingsRepository ?: com.example.data.repository.SettingsRepository(context) }
+    val ttsManager = remember { app?.ttsManager }
+
+    val initialBookId = remember {
+        val intentBook = pendingNotificationBookId?.value
+            ?: (context as? ComponentActivity)?.intent?.getStringExtra("extra_open_book_id")
+        val activeTtsBook = ttsManager?.mediaMetadata?.value?.bookId?.takeIf { it.isNotBlank() }
+        val sessionState = if (settingsRepo.isTtsAutoResumePlaybackEnabled()) settingsRepo.getTtsSessionState() else null
+        val autoResumeBook = sessionState?.bookId?.takeIf { it.isNotBlank() }
+        val lastBook = settingsRepo.getLastActiveBookId()
+        intentBook ?: activeTtsBook ?: autoResumeBook ?: lastBook
+    }
+
+    val initialChapterId = remember {
+        val intentChapter = pendingNotificationChapterId?.value
+            ?: (context as? ComponentActivity)?.intent?.getStringExtra("extra_open_chapter_id")
+        val activeTtsChapter = ttsManager?.mediaMetadata?.value?.chapterId?.takeIf { it.isNotBlank() }
+        val sessionState = if (settingsRepo.isTtsAutoResumePlaybackEnabled()) settingsRepo.getTtsSessionState() else null
+        val autoResumeChapter = sessionState?.chapterId?.takeIf { it.isNotBlank() }
+        val targetBook = initialBookId
+        val lastChapter = targetBook?.let { settingsRepo.getLastReadChapterId(it) }
+        intentChapter ?: activeTtsChapter ?: autoResumeChapter ?: lastChapter
+    }
+
     var currentScreen by rememberSaveable { mutableStateOf(Screen.HOME) }
     var selectedBookIdForDetail by rememberSaveable { mutableStateOf<String?>(null) }
-    var activeReaderBookId by rememberSaveable { mutableStateOf<String?>(null) }
-    var activeReaderChapterId by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeReaderBookId by rememberSaveable { mutableStateOf(initialBookId) }
+    var activeReaderChapterId by rememberSaveable { mutableStateOf(initialChapterId) }
+
+    // Handle new intent notification click while activity is alive
+    LaunchedEffect(pendingNotificationBookId?.value, pendingNotificationChapterId?.value) {
+        val bId = pendingNotificationBookId?.value
+        val cId = pendingNotificationChapterId?.value
+        if (bId != null && cId != null) {
+            activeReaderBookId = bId
+            activeReaderChapterId = cId
+            pendingNotificationBookId.value = null
+            pendingNotificationChapterId.value = null
+        }
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -122,6 +188,7 @@ fun MainApp(viewModel: MainViewModel) {
             onNavigateBack = {
                 activeReaderChapterId = null
                 activeReaderBookId = null
+                settingsRepo.setLastActiveBookId(null)
             }
         )
     } else if (selectedBookIdForDetail != null) {
@@ -159,7 +226,7 @@ fun MainApp(viewModel: MainViewModel) {
                                     }
                                 }
                             ) {
-                                Icon(Icons.Default.ListAlt, contentDescription = "Queue")
+                                Icon(Icons.AutoMirrored.Filled.ListAlt, contentDescription = "Queue")
                             }
                         },
                         label = { Text("Queue") },

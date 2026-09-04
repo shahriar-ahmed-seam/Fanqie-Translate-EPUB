@@ -118,4 +118,78 @@ class SettingsRepository(context: Context) {
     fun setTtsVoiceId(voiceId: String?) {
         prefs.edit().putString("tts_selected_voice_id", voiceId).apply()
     }
+
+    fun getLastActiveBookId(): String? {
+        return prefs.getString("last_active_book_id", null)
+    }
+
+    fun setLastActiveBookId(bookId: String?) {
+        prefs.edit().putString("last_active_book_id", bookId).apply()
+    }
+
+    fun isTtsAutoResumePlaybackEnabled(): Boolean {
+        return prefs.getBoolean("tts_auto_resume_playback", false)
+    }
+
+    fun setTtsAutoResumePlaybackEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("tts_auto_resume_playback", enabled).apply()
+    }
+
+    fun saveTtsSessionState(state: TtsPlaybackSessionState) {
+        prefs.edit().apply {
+            putString("tts_session_book_id", state.bookId)
+            putString("tts_session_chapter_id", state.chapterId)
+            putInt("tts_session_chapter_order", state.chapterOrder)
+            putInt("tts_session_paragraph_index", state.paragraphIndex.coerceAtLeast(0))
+            putString("tts_session_playback_state", state.playbackState)
+            putFloat("tts_session_speech_rate", state.speechRate)
+            putString("tts_session_voice_id", state.voiceId)
+            putLong("tts_session_timestamp", state.timestamp)
+            putInt("last_read_para_${state.bookId}_${state.chapterId}", state.paragraphIndex.coerceAtLeast(0))
+            putString("last_read_chapter_${state.bookId}", state.chapterId)
+            putString("last_active_book_id", state.bookId)
+            apply()
+        }
+    }
+
+    fun getTtsSessionState(): TtsPlaybackSessionState? {
+        val bookId = prefs.getString("tts_session_book_id", null) ?: return null
+        val chapterId = prefs.getString("tts_session_chapter_id", null) ?: return null
+        return TtsPlaybackSessionState(
+            bookId = bookId,
+            chapterId = chapterId,
+            chapterOrder = prefs.getInt("tts_session_chapter_order", 0),
+            paragraphIndex = prefs.getInt("tts_session_paragraph_index", 0),
+            playbackState = prefs.getString("tts_session_playback_state", "IDLE") ?: "IDLE",
+            speechRate = prefs.getFloat("tts_session_speech_rate", 1.0f),
+            voiceId = prefs.getString("tts_session_voice_id", null),
+            timestamp = prefs.getLong("tts_session_timestamp", 0L)
+        )
+    }
+
+    fun clearTtsSessionState() {
+        prefs.edit().apply {
+            remove("tts_session_book_id")
+            remove("tts_session_chapter_id")
+            remove("tts_session_chapter_order")
+            remove("tts_session_paragraph_index")
+            remove("tts_session_playback_state")
+            remove("tts_session_speech_rate")
+            remove("tts_session_voice_id")
+            remove("tts_session_timestamp")
+            apply()
+        }
+    }
 }
+
+data class TtsPlaybackSessionState(
+    val bookId: String,
+    val chapterId: String,
+    val chapterOrder: Int = 0,
+    val paragraphIndex: Int = 0,
+    val playbackState: String = "IDLE",
+    val speechRate: Float = 1.0f,
+    val voiceId: String? = null,
+    val timestamp: Long = System.currentTimeMillis()
+)
+

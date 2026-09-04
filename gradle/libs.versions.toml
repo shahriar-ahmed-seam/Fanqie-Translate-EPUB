@@ -42,9 +42,11 @@ googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
 jsoup = "1.18.3"
+media = "1.7.0"
 
 
 [libraries]
+androidx-media = { group = "androidx.media", name = "media", version.ref = "media" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

@@ -37,7 +37,9 @@ import com.example.data.db.AppDatabase
 import com.example.data.db.ChapterEntity
 import com.example.data.db.TranslationChunkEntity
 import com.example.data.repository.SettingsRepository
+import com.example.TranslatorApplication
 import com.example.tts.ReaderTtsManager
+import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsState
 import com.example.tts.TtsVoiceInfo
 import androidx.lifecycle.Lifecycle
@@ -71,26 +73,46 @@ fun ReaderScreen(
     val db = remember { AppDatabase.getInstance(context) }
     val settingsRepo = remember { SettingsRepository(context) }
 
-    val ttsManager = remember(context) { ReaderTtsManager(context) }
-    DisposableEffect(ttsManager) {
-        onDispose {
-            ttsManager.release()
-        }
-    }
+    val app = context.applicationContext as? TranslatorApplication
+    val ttsManager = remember { app?.ttsManager ?: ReaderTtsManager(context.applicationContext) }
 
-    // Lifecycle observer to pause safely on background and restore state when returning
+    var currentChapterId by rememberSaveable(bookId) { mutableStateOf(initialChapterId) }
+
+    val listState = rememberLazyListState()
+    val tocListState = rememberLazyListState()
+
+    // Lifecycle observer to persist position on background and destroy without killing background audio
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, ttsManager) {
+    DisposableEffect(lifecycleOwner, ttsManager, currentChapterId) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    val meta = ttsManager.mediaMetadata.value
+                    val isTtsForThis = (ttsManager.ttsState.value == TtsState.PLAYING || ttsManager.ttsState.value == TtsState.PAUSED) &&
+                            meta.bookId == bookId && meta.chapterId == currentChapterId
+                    val paraToSave = if (isTtsForThis) {
+                        ttsManager.currentParagraphIndex.value
+                    } else {
+                        (listState.firstVisibleItemIndex - 1).coerceAtLeast(0)
+                    }
+                    viewModel.setLastReadParagraphIndex(bookId, currentChapterId, paraToSave)
+                    settingsRepo.setLastActiveBookId(bookId)
                     ttsManager.onAppBackgrounded()
                 }
                 Lifecycle.Event.ON_RESUME -> {
                     ttsManager.onAppForegrounded()
                 }
                 Lifecycle.Event.ON_DESTROY -> {
-                    ttsManager.release()
+                    val meta = ttsManager.mediaMetadata.value
+                    val isTtsForThis = (ttsManager.ttsState.value == TtsState.PLAYING || ttsManager.ttsState.value == TtsState.PAUSED) &&
+                            meta.bookId == bookId && meta.chapterId == currentChapterId
+                    val paraToSave = if (isTtsForThis) {
+                        ttsManager.currentParagraphIndex.value
+                    } else {
+                        (listState.firstVisibleItemIndex - 1).coerceAtLeast(0)
+                    }
+                    viewModel.setLastReadParagraphIndex(bookId, currentChapterId, paraToSave)
+                    // Note: Background playback is preserved; do NOT release ttsManager here.
                 }
                 else -> {}
             }
@@ -108,6 +130,25 @@ fun ReaderScreen(
     val availableVoices by ttsManager.availableVoices.collectAsState()
     val selectedVoice by ttsManager.selectedVoice.collectAsState()
     val ttsErrorMessage by ttsManager.errorMessage.collectAsState()
+    val ttsMetadata by ttsManager.mediaMetadata.collectAsState()
+    val autoAdvanceChapter by ttsManager.autoAdvanceChapter.collectAsState()
+
+    val isCurrentChapterActiveInTts = (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) &&
+            ttsMetadata.bookId == bookId && ttsMetadata.chapterId == currentChapterId
+
+    val isAnotherNovelOrChapterPlaying = (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) &&
+            (ttsMetadata.bookId != bookId || ttsMetadata.chapterId != currentChapterId)
+
+    // Synchronize currentChapterId if TTS is actively playing or paused for this book and advances in background
+    LaunchedEffect(ttsMetadata.chapterId, ttsMetadata.bookId, ttsState) {
+        if ((ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) &&
+            ttsMetadata.bookId == bookId &&
+            ttsMetadata.chapterId.isNotBlank() &&
+            ttsMetadata.chapterId != currentChapterId
+        ) {
+            currentChapterId = ttsMetadata.chapterId
+        }
+    }
 
     // Restore persisted settings into TTS manager on first composition
     LaunchedEffect(Unit) {
@@ -122,13 +163,8 @@ fun ReaderScreen(
 
     var showTtsControls by rememberSaveable { mutableStateOf(false) }
     var showVoiceSelectionSheet by remember { mutableStateOf(false) }
-
-    var autoAdvanceChapter by rememberSaveable {
-        mutableStateOf(settingsRepo.isTtsAutoAdvanceChapterEnabled())
-    }
     var shouldContinueTtsOnNextChapter by remember { mutableStateOf(false) }
 
-    var currentChapterId by rememberSaveable(bookId) { mutableStateOf(initialChapterId) }
     val chapters by db.chapterDao().observeChaptersByBook(bookId).collectAsState(initial = emptyList())
     val currentChapter = chapters.firstOrNull { it.id == currentChapterId }
 
@@ -143,24 +179,6 @@ fun ReaderScreen(
 
     var novelTitle by remember { mutableStateOf("") }
 
-    // Synchronize autoAdvanceChapter setting with TTS manager and persistent storage
-    LaunchedEffect(autoAdvanceChapter) {
-        ttsManager.setAutoAdvanceChapter(autoAdvanceChapter)
-        settingsRepo.setTtsAutoAdvanceChapterEnabled(autoAdvanceChapter)
-    }
-
-    // Connect chapter completion to advance to next chapter when enabled
-    LaunchedEffect(nextChapter) {
-        ttsManager.onChapterComplete = {
-            if (nextChapter != null) {
-                shouldContinueTtsOnNextChapter = true
-                currentChapterId = nextChapter.id
-            } else {
-                ttsManager.stop()
-            }
-        }
-    }
-
     // Synchronize if parent initialChapterId changes
     LaunchedEffect(initialChapterId) {
         if (initialChapterId.isNotBlank() && initialChapterId != currentChapterId) {
@@ -168,12 +186,9 @@ fun ReaderScreen(
         }
     }
 
-    val listState = rememberLazyListState()
-    val tocListState = rememberLazyListState()
-
     // Auto-scroll to active TTS paragraph during playback and persist reading position
-    LaunchedEffect(currentTtsParaIndex, ttsState) {
-        if (ttsState == TtsState.PLAYING && currentTtsParaIndex in paragraphs.indices) {
+    LaunchedEffect(currentTtsParaIndex, ttsState, isCurrentChapterActiveInTts) {
+        if (isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING && currentTtsParaIndex in paragraphs.indices) {
             listState.animateScrollToItem((currentTtsParaIndex + 1).coerceAtMost(paragraphs.size))
             viewModel.setLastReadParagraphIndex(bookId, currentChapterId, currentTtsParaIndex)
         }
@@ -197,12 +212,28 @@ fun ReaderScreen(
     var selectedTheme by rememberSaveable { mutableStateOf(ReaderTheme.SYSTEM) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showChapterPickerSheet by remember { mutableStateOf(false) }
+    var isAutoResumeTriggered by rememberSaveable { mutableStateOf(false) }
+    var lastSavedParaIndex by rememberSaveable { mutableIntStateOf(0) }
+
+    val playCurrentChapter: (Int) -> Unit = { targetIndex ->
+        ttsManager.setChapterAndParagraphs(
+            chapterId = currentChapterId,
+            newParagraphs = paragraphs,
+            continuePlaying = true,
+            startIndex = targetIndex,
+            bookId = bookId,
+            novelTitle = novelTitle,
+            chapterTitle = chapterTitle,
+            chapterOrder = currentChapter?.chapterOrder ?: 0
+        )
+    }
 
     // Load translated chapter content whenever currentChapterId changes
     LaunchedEffect(currentChapterId) {
         isLoading = true
         viewModel.setLastReadChapterId(bookId, currentChapterId)
         val savedPara = viewModel.getLastReadParagraphIndex(bookId, currentChapterId)
+        lastSavedParaIndex = savedPara
 
         withContext(Dispatchers.IO) {
             val job = db.jobDao().getJobByBookId(bookId)
@@ -250,19 +281,53 @@ fun ReaderScreen(
         val resumeTts = shouldContinueTtsOnNextChapter
         shouldContinueTtsOnNextChapter = false
 
-        val startPara = if (resumeTts) 0 else savedPara
-        ttsManager.setChapterAndParagraphs(
-            chapterId = currentChapterId,
-            newParagraphs = paragraphs,
-            continuePlaying = resumeTts,
-            startIndex = startPara
-        )
-
-        if (!resumeTts && savedPara > 0 && savedPara < paragraphs.size) {
-            // item 0 is the chapter title header, so paragraph index starts at item 1
-            listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
+        if (isCurrentChapterActiveInTts) {
+            ttsManager.setChapterMetadata(
+                bookId = bookId,
+                chapterId = currentChapterId,
+                novelTitle = novelTitle,
+                chapterTitle = chapterTitle,
+                chapterOrder = currentChapter?.chapterOrder ?: 0
+            )
+            val activePara = ttsManager.currentParagraphIndex.value
+            if (activePara in paragraphs.indices) {
+                listState.scrollToItem((activePara + 1).coerceAtMost(paragraphs.size))
+            }
+        } else if (!isAnotherNovelOrChapterPlaying) {
+            val startPara = if (resumeTts) 0 else savedPara
+            ttsManager.setChapterAndParagraphs(
+                chapterId = currentChapterId,
+                newParagraphs = paragraphs,
+                continuePlaying = resumeTts,
+                startIndex = startPara,
+                bookId = bookId,
+                novelTitle = novelTitle,
+                chapterTitle = chapterTitle,
+                chapterOrder = currentChapter?.chapterOrder ?: 0
+            )
+            if (!resumeTts && savedPara > 0 && savedPara < paragraphs.size) {
+                listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
+            } else if (!resumeTts) {
+                listState.scrollToItem(0)
+            }
         } else {
-            listState.scrollToItem(0)
+            // Another novel or chapter is playing in the background:
+            // Do NOT touch ttsManager so background playback is preserved.
+            if (savedPara > 0 && savedPara < paragraphs.size) {
+                listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
+            } else {
+                listState.scrollToItem(0)
+            }
+        }
+
+        // Optional: Resume TTS automatically if explicitly enabled and previous session was PLAYING
+        if (!isAutoResumeTriggered && settingsRepo.isTtsAutoResumePlaybackEnabled()) {
+            isAutoResumeTriggered = true
+            val session = settingsRepo.getTtsSessionState()
+            if (session != null && session.bookId == bookId && session.chapterId == currentChapterId && session.playbackState == TtsState.PLAYING.name && (ttsState == TtsState.IDLE || ttsState == TtsState.STOPPED)) {
+                val targetPara = session.paragraphIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+                playCurrentChapter(targetPara)
+            }
         }
     }
 
@@ -397,6 +462,13 @@ fun ReaderScreen(
                                 ) {
                                     val statusText = when {
                                         !isTtsEnabled -> "Text-to-Speech disabled"
+                                        isAnotherNovelOrChapterPlaying -> {
+                                            if (ttsMetadata.bookId != bookId) {
+                                                "Playing in background: ${ttsMetadata.novelTitle.ifBlank { "Audiobook" }}"
+                                            } else {
+                                                "Playing Chapter ${(ttsMetadata.chapterOrder + 1)} in background"
+                                            }
+                                        }
                                         ttsState == TtsState.INITIALIZING -> "Connecting speech engine..."
                                         ttsState == TtsState.PLAYING -> "Reading paragraph ${currentTtsParaIndex + 1} of ${paragraphs.size}"
                                         ttsState == TtsState.PAUSED -> "Paused at paragraph ${currentTtsParaIndex + 1} of ${paragraphs.size}"
@@ -453,7 +525,11 @@ fun ReaderScreen(
 
                                     // Auto-advance chapter toggle button
                                     IconButton(
-                                        onClick = { autoAdvanceChapter = !autoAdvanceChapter },
+                                        onClick = {
+                                            val next = !autoAdvanceChapter
+                                            ttsManager.setAutoAdvanceChapter(next)
+                                            settingsRepo.setTtsAutoAdvanceChapterEnabled(next)
+                                        },
                                         enabled = isTtsEnabled,
                                         modifier = Modifier
                                             .size(36.dp)
@@ -544,7 +620,7 @@ fun ReaderScreen(
                                 // 1. Previous Paragraph
                                 IconButton(
                                     onClick = { ttsManager.previousParagraph() },
-                                    enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && currentTtsParaIndex > 0 && paragraphs.isNotEmpty(),
+                                    enabled = isTtsEnabled && isCurrentChapterActiveInTts && ttsState != TtsState.INITIALIZING && currentTtsParaIndex > 0 && paragraphs.isNotEmpty(),
                                     modifier = Modifier.testTag("reader_tts_prev_para_button")
                                 ) {
                                     Icon(
@@ -557,20 +633,25 @@ fun ReaderScreen(
                                 Spacer(modifier = Modifier.width(12.dp))
 
                                 // 2. Play / Resume Button
-                                val isPlayOrResumeEnabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && paragraphs.isNotEmpty() && ttsState != TtsState.PLAYING
+                                val isPlayOrResumeEnabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && paragraphs.isNotEmpty() && (!isCurrentChapterActiveInTts || ttsState != TtsState.PLAYING)
 
                                 FilledIconButton(
                                     onClick = {
-                                        if (ttsState == TtsState.PAUSED) {
-                                            ttsManager.resume()
+                                        if (isCurrentChapterActiveInTts) {
+                                            if (ttsState == TtsState.PAUSED) {
+                                                ttsManager.resume()
+                                            } else {
+                                                ttsManager.play(currentTtsParaIndex)
+                                            }
                                         } else {
-                                            ttsManager.play(currentTtsParaIndex)
+                                            val targetPara = if (currentTtsParaIndex in paragraphs.indices) currentTtsParaIndex else lastSavedParaIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+                                            playCurrentChapter(targetPara)
                                         }
                                     },
                                     enabled = isPlayOrResumeEnabled,
                                     modifier = Modifier
                                         .size(48.dp)
-                                        .testTag(if (ttsState == TtsState.PAUSED) "reader_tts_resume_button" else "reader_tts_play_button")
+                                        .testTag(if (isCurrentChapterActiveInTts && ttsState == TtsState.PAUSED) "reader_tts_resume_button" else "reader_tts_play_button")
                                         .testTag("reader_tts_play_pause_button"),
                                     colors = IconButtonDefaults.filledIconButtonColors(
                                         containerColor = MaterialTheme.colorScheme.primary,
@@ -581,7 +662,7 @@ fun ReaderScreen(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.PlayArrow,
-                                        contentDescription = if (ttsState == TtsState.PAUSED) "Resume" else "Play",
+                                        contentDescription = if (isCurrentChapterActiveInTts && ttsState == TtsState.PAUSED) "Resume" else "Play",
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
@@ -630,7 +711,7 @@ fun ReaderScreen(
                                 // 5. Next Paragraph
                                 IconButton(
                                     onClick = { ttsManager.nextParagraph() },
-                                    enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && currentTtsParaIndex < paragraphs.size - 1 && paragraphs.isNotEmpty(),
+                                    enabled = isTtsEnabled && isCurrentChapterActiveInTts && ttsState != TtsState.INITIALIZING && currentTtsParaIndex < paragraphs.size - 1 && paragraphs.isNotEmpty(),
                                     modifier = Modifier.testTag("reader_tts_next_para_button")
                                 ) {
                                     Icon(
@@ -659,7 +740,7 @@ fun ReaderScreen(
                         FilledTonalButton(
                             onClick = {
                                 if (prevChapter != null) {
-                                    if (ttsState == TtsState.PLAYING) {
+                                    if (isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING) {
                                         shouldContinueTtsOnNextChapter = true
                                     }
                                     currentChapterId = prevChapter.id
@@ -683,7 +764,7 @@ fun ReaderScreen(
                         FilledTonalButton(
                             onClick = {
                                 if (nextChapter != null) {
-                                    if (ttsState == TtsState.PLAYING) {
+                                    if (isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING) {
                                         shouldContinueTtsOnNextChapter = true
                                     }
                                     currentChapterId = nextChapter.id
@@ -745,7 +826,7 @@ fun ReaderScreen(
                         items = paragraphs,
                         key = { index, _ -> "ch_${currentChapterId}_para_$index" }
                     ) { index, paragraph ->
-                        val isTtsActive = (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) && index == currentTtsParaIndex
+                        val isTtsActive = isCurrentChapterActiveInTts && index == currentTtsParaIndex
                         val shape = RoundedCornerShape(8.dp)
 
                         val paraModifier = Modifier
@@ -763,13 +844,21 @@ fun ReaderScreen(
                             .combinedClickable(
                                 onDoubleClick = {
                                     if (isTtsEnabled) {
-                                        ttsManager.play(index)
+                                        if (isCurrentChapterActiveInTts) {
+                                            ttsManager.play(index)
+                                        } else {
+                                            playCurrentChapter(index)
+                                        }
                                         showTtsControls = true
                                     }
                                 },
                                 onClick = {
                                     if (isTtsEnabled && (showTtsControls || ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED)) {
-                                        ttsManager.play(index)
+                                        if (isCurrentChapterActiveInTts) {
+                                            ttsManager.play(index)
+                                        } else {
+                                            playCurrentChapter(index)
+                                        }
                                     }
                                 }
                             )
