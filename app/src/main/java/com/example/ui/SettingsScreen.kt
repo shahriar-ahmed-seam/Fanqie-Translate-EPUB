@@ -7,6 +7,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
@@ -17,6 +18,7 @@ import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Spellcheck
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,7 +42,8 @@ import java.util.Locale
 fun SettingsScreen(
     settings: AppSettings,
     onSaveSettings: (AppSettings) -> Unit,
-    onCheckForUpdates: () -> Unit
+    onCheckForUpdates: () -> Unit,
+    viewModel: MainViewModel? = null
 ) {
     var isDarkMode by remember(settings) { mutableStateOf(settings.isDarkMode) }
     var workerCount by remember(settings) { mutableFloatStateOf(settings.workerCount.toFloat()) }
@@ -65,6 +68,8 @@ fun SettingsScreen(
     var autoResumePlayback by remember { mutableStateOf(settingsRepo.isTtsAutoResumePlaybackEnabled()) }
     var autoAdvanceChapter by remember { mutableStateOf(settingsRepo.isTtsAutoAdvanceChapterEnabled()) }
     var showVoiceDropdown by remember { mutableStateOf(false) }
+
+    val ttsRules by viewModel?.ttsRules?.collectAsState() ?: remember { mutableStateOf(emptyList()) }
 
     fun buildCurrentSettings(): AppSettings {
         return AppSettings(
@@ -468,6 +473,18 @@ fun SettingsScreen(
                         )
                     }
                 }
+            }
+
+            // TTS Speech Rules Section (Settings UI style)
+            if (viewModel != null) {
+                TtsRulesSection(
+                    rules = ttsRules,
+                    onSaveRule = { viewModel.saveTtsRule(it) },
+                    onDeleteRule = { viewModel.deleteTtsRule(it) },
+                    onToggleRule = { viewModel.toggleTtsRule(it) },
+                    onReorderRule = { id, up -> viewModel.reorderTtsRule(id, up) },
+                    modifier = Modifier.testTag("tts_rules_settings_section")
+                )
             }
 
             // Worker Concurrency Card

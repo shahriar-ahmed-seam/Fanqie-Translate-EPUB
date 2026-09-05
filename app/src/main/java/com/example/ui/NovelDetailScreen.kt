@@ -93,6 +93,14 @@ fun NovelDetailScreen(
         }
     }
 
+    // Bookmarked chapters state
+    val bookmarkedChapterIdsList by viewModel.observeBookmarkedChapterIds(bookId).collectAsState(emptyList())
+    val bookmarkedChapterIds = remember(bookmarkedChapterIdsList) { bookmarkedChapterIdsList.toSet() }
+    var showOnlyBookmarks by rememberSaveable(bookId) { mutableStateOf(false) }
+
+    // Expandable description state
+    var isDescriptionExpanded by rememberSaveable(bookId) { mutableStateOf(false) }
+
     // Selection mode state
     var isSelectionMode by remember { mutableStateOf(false) }
     var selectedChapterIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -128,8 +136,10 @@ fun NovelDetailScreen(
     val displayDesc = translatedDescription ?: currentBookJob?.book?.description ?: "No description available."
     val coverPath = currentBookJob?.book?.coverPath
 
+    val isLocalBook = currentBookJob?.book?.isLocalBook == true || currentBookJob?.job == null
+
     val totalChapters = chapters.size
-    val translatedChaptersCount = chapters.count { chapter ->
+    val translatedChaptersCount = if (isLocalBook) totalChapters else chapters.count { chapter ->
         val prog = chapterProgressMap[chapter.id]
         prog != null && prog.second > 0 && prog.first >= prog.second
     }
@@ -152,9 +162,9 @@ fun NovelDetailScreen(
     }
 
     // Memoize translated counts per chapter group to avoid O(N) calculations during scrolling/recomposition
-    val groupProgressCounts = remember(chapterGroups, chapterProgressMap) {
+    val groupProgressCounts = remember(chapterGroups, chapterProgressMap, isLocalBook) {
         chapterGroups.associate { group ->
-            group.groupIndex to group.chapters.count { ch ->
+            group.groupIndex to if (isLocalBook) group.chapters.size else group.chapters.count { ch ->
                 val prog = chapterProgressMap[ch.id]
                 prog != null && prog.second > 0 && prog.first >= prog.second
             }
@@ -342,14 +352,20 @@ fun NovelDetailScreen(
         },
         modifier = modifier
     ) { paddingValues ->
-        val filteredChapters = remember(chapters, searchQuery) {
-            if (searchQuery.isBlank()) chapters
-            else chapters.filter { chapter ->
-                val trTitle = chapterTitlesMap[chapter.id] ?: ""
-                chapter.title.contains(searchQuery, ignoreCase = true) ||
-                        trTitle.contains(searchQuery, ignoreCase = true) ||
-                        (chapter.chapterOrder + 1).toString() == searchQuery.trim()
+        val filteredChapters = remember(chapters, searchQuery, showOnlyBookmarks, bookmarkedChapterIds, chapterTitlesMap) {
+            var list = chapters
+            if (showOnlyBookmarks) {
+                list = list.filter { bookmarkedChapterIds.contains(it.id) }
             }
+            if (searchQuery.isNotBlank()) {
+                list = list.filter { chapter ->
+                    val trTitle = chapterTitlesMap[chapter.id] ?: ""
+                    chapter.title.contains(searchQuery, ignoreCase = true) ||
+                            trTitle.contains(searchQuery, ignoreCase = true) ||
+                            (chapter.chapterOrder + 1).toString() == searchQuery.trim()
+                }
+            }
+            list
         }
 
         LazyColumn(
@@ -420,9 +436,9 @@ fun NovelDetailScreen(
                                     overflow = TextOverflow.Ellipsis
                                 )
 
-                                if (originalTitle != null && originalTitle != displayTitle) {
+                                if (translatedTitle.isNullOrBlank() && originalTitle != null && originalTitle != displayTitle) {
                                     Text(
-                                        text = originalTitle ?: "",
+                                        text = originalTitle,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
@@ -444,7 +460,7 @@ fun NovelDetailScreen(
                                     color = MaterialTheme.colorScheme.secondaryContainer
                                 ) {
                                     Text(
-                                        text = "Translated: $translatedChaptersCount / $totalChapters ch",
+                                        text = if (isLocalBook) "Library Book • $totalChapters ch" else "Translated: $translatedChaptersCount / $totalChapters ch",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer,
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -461,13 +477,27 @@ fun NovelDetailScreen(
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )
+                            val isLongDesc = displayDesc.length > 180 || displayDesc.count { it == '\n' } > 3
                             Text(
                                 text = displayDesc,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 6,
-                                overflow = TextOverflow.Ellipsis
+                                maxLines = if (isDescriptionExpanded) Int.MAX_VALUE else 4,
+                                overflow = if (isDescriptionExpanded) TextOverflow.Clip else TextOverflow.Ellipsis
                             )
+                            if (isLongDesc) {
+                                TextButton(
+                                    onClick = { isDescriptionExpanded = !isDescriptionExpanded },
+                                    modifier = Modifier.align(Alignment.End),
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        text = if (isDescriptionExpanded) "See less" else "See more",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -494,13 +524,41 @@ fun NovelDetailScreen(
                             .testTag("chapter_search_input")
                     )
 
+                    // Filter row: All Chapters vs Bookmarked
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = !showOnlyBookmarks,
+                            onClick = { showOnlyBookmarks = false },
+                            label = { Text("All (${chapters.size})") },
+                            leadingIcon = if (!showOnlyBookmarks) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                            } else null
+                        )
+                        FilterChip(
+                            selected = showOnlyBookmarks,
+                            onClick = { showOnlyBookmarks = true },
+                            label = { Text("Bookmarked (${bookmarkedChapterIds.size})") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (showOnlyBookmarks) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        )
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Chapters (${filteredChapters.size})",
+                            text = if (showOnlyBookmarks) "Bookmarked Chapters (${filteredChapters.size})" else "Chapters (${filteredChapters.size})",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -521,40 +579,61 @@ fun NovelDetailScreen(
                 }
             }
 
-            if (searchQuery.isNotBlank()) {
-                // Flat filtered list when search is active
-                itemsIndexed(
-                    items = filteredChapters,
-                    key = { _, chapter -> chapter.id }
-                ) { index, chapter ->
-                    val trTitle = chapterTitlesMap[chapter.id]?.takeIf { it.isNotBlank() }
-                    val displayChapterTitle = trTitle ?: chapter.title
-                    val isSelected = selectedChapterIds.contains(chapter.id)
-                    val isLastRead = chapter.id == lastReadChapterId
-                    val prog = chapterProgressMap[chapter.id]
-                    val isFullyTranslated = prog != null && prog.second > 0 && prog.first >= prog.second
-
-                    ChapterListItem(
-                        chapterNumber = chapter.chapterOrder + 1,
-                        title = displayChapterTitle,
-                        originalTitle = if (trTitle != null && trTitle != chapter.title) chapter.title else null,
-                        isSelectionMode = isSelectionMode,
-                        isSelected = isSelected,
-                        isLastRead = isLastRead,
-                        isTranslated = isFullyTranslated,
-                        progress = prog,
-                        onToggleSelect = {
-                            selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
-                        },
-                        onClick = {
-                            if (isSelectionMode) {
-                                selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
-                            } else {
-                                viewModel.setLastReadChapterId(bookId, chapter.id)
-                                onOpenReader(chapter.id)
-                            }
+            if (searchQuery.isNotBlank() || showOnlyBookmarks) {
+                if (filteredChapters.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (showOnlyBookmarks) "No chapters bookmarked yet. Tap the bookmark icon on any chapter to add it." else "No chapters found matching '$searchQuery'.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                    )
+                    }
+                } else {
+                    // Flat filtered list when search or bookmark filter is active
+                    itemsIndexed(
+                        items = filteredChapters,
+                        key = { _, chapter -> chapter.id }
+                    ) { index, chapter ->
+                        val trTitle = chapterTitlesMap[chapter.id]?.takeIf { it.isNotBlank() }
+                        val displayChapterTitle = trTitle ?: chapter.title
+                        val isSelected = selectedChapterIds.contains(chapter.id)
+                        val isLastRead = chapter.id == lastReadChapterId
+                        val prog = chapterProgressMap[chapter.id]
+                        val isFullyTranslated = isLocalBook || (prog != null && prog.second > 0 && prog.first >= prog.second)
+
+                        ChapterListItem(
+                            chapterNumber = chapter.chapterOrder + 1,
+                            title = displayChapterTitle,
+                            originalTitle = null,
+                            isSelectionMode = isSelectionMode,
+                            isSelected = isSelected,
+                            isLastRead = isLastRead,
+                            isTranslated = isFullyTranslated,
+                            isBookmarked = bookmarkedChapterIds.contains(chapter.id),
+                            progress = if (isLocalBook) null else prog,
+                            onToggleSelect = {
+                                selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
+                            },
+                            onToggleBookmark = {
+                                viewModel.toggleBookmark(bookId, chapter.id)
+                            },
+                            onClick = {
+                                if (isSelectionMode) {
+                                    selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
+                                } else {
+                                    viewModel.setLastReadChapterId(bookId, chapter.id)
+                                    onOpenReader(chapter.id)
+                                }
+                            }
+                        )
+                    }
                 }
             } else {
                 // Grouped into expandable ranges of 100
@@ -599,19 +678,23 @@ fun NovelDetailScreen(
                             val isSelected = selectedChapterIds.contains(chapter.id)
                             val isLastRead = chapter.id == lastReadChapterId
                             val prog = chapterProgressMap[chapter.id]
-                            val isFullyTranslated = prog != null && prog.second > 0 && prog.first >= prog.second
+                            val isFullyTranslated = isLocalBook || (prog != null && prog.second > 0 && prog.first >= prog.second)
 
                             ChapterListItem(
                                 chapterNumber = chapter.chapterOrder + 1,
                                 title = displayChapterTitle,
-                                originalTitle = if (trTitle != null && trTitle != chapter.title) chapter.title else null,
+                                originalTitle = null,
                                 isSelectionMode = isSelectionMode,
                                 isSelected = isSelected,
                                 isLastRead = isLastRead,
                                 isTranslated = isFullyTranslated,
-                                progress = prog,
+                                isBookmarked = bookmarkedChapterIds.contains(chapter.id),
+                                progress = if (isLocalBook) null else prog,
                                 onToggleSelect = {
                                     selectedChapterIds = if (isSelected) selectedChapterIds - chapter.id else selectedChapterIds + chapter.id
+                                },
+                                onToggleBookmark = {
+                                    viewModel.toggleBookmark(bookId, chapter.id)
                                 },
                                 onClick = {
                                     if (isSelectionMode) {
@@ -660,8 +743,10 @@ fun ChapterListItem(
     isSelected: Boolean,
     isLastRead: Boolean,
     isTranslated: Boolean,
+    isBookmarked: Boolean = false,
     progress: Pair<Int, Int>?,
     onToggleSelect: () -> Unit,
+    onToggleBookmark: () -> Unit = {},
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -765,6 +850,19 @@ fun ChapterListItem(
                     text = "${progress.first}/${progress.second}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline
+                )
+            }
+
+            // Bookmark Toggle
+            IconButton(
+                onClick = onToggleBookmark,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                    contentDescription = if (isBookmarked) "Bookmarked" else "Bookmark",
+                    tint = if (isBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(20.dp)
                 )
             }
         }

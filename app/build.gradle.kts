@@ -88,6 +88,7 @@ android {
       signingConfig = signingConfigs.getByName("debug")
     }
     release {
+      signingConfig = signingConfigs.getByName("debug")
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

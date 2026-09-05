@@ -138,6 +138,8 @@ fun MainApp(
     val snackbarHostState = remember { SnackbarHostState() }
 
     val booksWithJobs by viewModel.allBooksWithJobs.collectAsStateWithLifecycle()
+    val libraryGroups by viewModel.libraryGroups.collectAsStateWithLifecycle()
+    val bookGroupCrossRefs by viewModel.bookGroupCrossRefs.collectAsStateWithLifecycle()
     val activeWorkers by viewModel.activeWorkers.collectAsStateWithLifecycle()
     val activeWorkersByJob by viewModel.activeWorkersByJob.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
@@ -250,12 +252,19 @@ fun MainApp(
                 when (currentScreen) {
                     Screen.HOME -> HomeScreen(
                         booksWithJobs = booksWithJobs,
+                        libraryGroups = libraryGroups,
+                        bookGroupCrossRefs = bookGroupCrossRefs,
                         activeWorkers = activeWorkers,
                         activeWorkersByJob = activeWorkersByJob,
                         exportingBookIds = exportingBookIds,
                         isProcessing = isProcessing,
-                        onSelectSingleEpub = { viewModel.previewSingleEpub(it) },
+                        onSelectSingleEpub = { viewModel.previewSingleEpub(it, isLibraryIntent = false) },
                         onSelectMultipleEpubs = { viewModel.importMultipleEpubs(it) },
+                        onAddToLibrary = { viewModel.previewSingleEpub(it, isLibraryIntent = true) },
+                        onCreateGroup = { viewModel.createGroup(it) },
+                        onRenameGroup = { id, name -> viewModel.renameGroup(id, name) },
+                        onDeleteGroup = { viewModel.deleteGroup(it) },
+                        onSetBookGroups = { bookId, groups -> viewModel.setBookGroups(bookId, groups) },
                         onNavigateToQueue = { currentScreen = Screen.QUEUE },
                         onOpenNovelDetail = { bookId -> selectedBookIdForDetail = bookId },
                         onExportEpub = onExport,
@@ -279,7 +288,8 @@ fun MainApp(
                     Screen.SETTINGS -> SettingsScreen(
                         settings = settings,
                         onSaveSettings = { viewModel.updateSettings(it) },
-                        onCheckForUpdates = { viewModel.checkForUpdates(silent = false) }
+                        onCheckForUpdates = { viewModel.checkForUpdates(silent = false) },
+                        viewModel = viewModel
                     )
                 }
             }
@@ -291,7 +301,8 @@ fun MainApp(
         BookPreviewDialog(
             previewState = preview,
             onDismiss = { viewModel.closePreview() },
-            onConfirm = { viewModel.enqueuePreviewedBook() }
+            onConfirm = { viewModel.enqueuePreviewedBook() },
+            onAddToLibrary = { viewModel.addPreviewedBookToLibrary() }
         )
     }
 

@@ -9,9 +9,17 @@ import androidx.lifecycle.viewModelScope
 import com.example.TranslatorApplication
 import com.example.data.db.AppDatabase
 import com.example.data.db.BookEntity
+import com.example.data.db.BookType
+import com.example.data.db.ChapterEntity
 import com.example.data.db.TranslationJobEntity
+import com.example.data.db.LibraryGroupEntity
+import com.example.data.db.BookGroupCrossRefEntity
+import com.example.data.db.ChapterBookmarkEntity
 import com.example.data.repository.AppSettings
 import com.example.data.repository.SettingsRepository
+import com.example.data.db.toEntity
+import com.example.data.db.toModel
+import com.example.tts.rule.TtsRule
 import com.example.epub.EpubParser
 import com.example.queue.ImportProgress
 import com.example.queue.TranslationQueueManager
@@ -23,6 +31,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.UUID
+import java.util.zip.ZipFile
 
 data class BookWithJob(
     val book: BookEntity,
@@ -40,7 +50,8 @@ data class BookPreviewState(
     val author: String,
     val description: String,
     val chapterCount: Int,
-    val tempCoverFile: File?
+    val tempCoverFile: File?,
+    val isLibraryIntent: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -62,6 +73,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val titleMap = titleChunks.associate { it.bookId to it.translatedText?.takeIf { t -> t.isNotBlank() } }
         books.map { BookWithJob(it, jobMap[it.id], titleMap[it.id]) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val libraryGroups: StateFlow<List<LibraryGroupEntity>> = database.groupDao().observeAllGroups()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val bookGroupCrossRefs: StateFlow<List<BookGroupCrossRefEntity>> = database.groupDao().observeAllCrossRefs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val ttsRules: StateFlow<List<TtsRule>> = database.ttsRuleDao().observeAllRules()
+        .map { list -> list.map { it.toModel() } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val activeWorkersByJob: StateFlow<Map<String, Int>> = queueManager.activeWorkersByJob
 
@@ -99,7 +120,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _previewState.value = null
     }
 
-    fun previewSingleEpub(uri: Uri) {
+    fun previewSingleEpub(uri: Uri, isLibraryIntent: Boolean = false) {
         viewModelScope.launch {
             try {
                 val fileName = getFileNameFromUri(getApplication(), uri)
@@ -122,7 +143,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         author = quickInfo.metadata.author,
                         description = quickInfo.metadata.description,
                         chapterCount = quickInfo.spine.size,
-                        tempCoverFile = coverFile
+                        tempCoverFile = coverFile,
+                        isLibraryIntent = isLibraryIntent
                     )
                 } finally {
                     if (tempFile.exists()) {
@@ -131,6 +153,125 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 _message.value = "Failed to parse EPUB: ${e.message}"
+            }
+        }
+    }
+
+    suspend fun addEpubToLibraryInternal(uri: Uri, customFileName: String? = null): BookEntity = withContext(Dispatchers.IO) {
+        val fileName = customFileName ?: getFileNameFromUri(getApplication(), uri)
+        val bookId = UUID.randomUUID().toString()
+        val bookDir = File(getApplication<Application>().filesDir, "books/$bookId").apply { mkdirs() }
+        val sourceEpubFile = File(bookDir, "source.epub")
+
+        // 1. Copy original file to persistent app storage
+        getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+            sourceEpubFile.outputStream().use { output ->
+                input.copyTo(output, bufferSize = 32 * 1024)
+            }
+        } ?: throw IllegalStateException("Cannot open input stream for $uri")
+
+        // 2. Parse EPUB metadata and spine
+        val quickInfo = EpubParser.parseQuickInfo(sourceEpubFile)
+
+        // 3. Extract and persist cover
+        var coverPath: String? = null
+        if (quickInfo.coverBytes != null && quickInfo.coverBytes.isNotEmpty()) {
+            val ext = if (quickInfo.coverMediaType?.contains("png") == true) "png" else "jpg"
+            val coverFile = File(bookDir, "cover.$ext")
+            coverFile.writeBytes(quickInfo.coverBytes)
+            coverPath = coverFile.absolutePath
+        }
+
+        // 4. Create and insert BookEntity (bookType = LOCAL, totalChunks = 0)
+        val bookTitle = quickInfo.metadata.title.ifBlank { fileName.removeSuffix(".epub") }
+        val bookAuthor = quickInfo.metadata.author.ifBlank { "Unknown Author" }
+        val book = BookEntity(
+            id = bookId,
+            title = bookTitle,
+            author = bookAuthor,
+            description = quickInfo.metadata.description,
+            coverPath = coverPath,
+            originalUri = uri.toString(),
+            originalFileName = fileName,
+            chapterCount = quickInfo.spine.size,
+            totalChunks = 0,
+            createdAt = System.currentTimeMillis(),
+            sourceLanguage = quickInfo.metadata.language.ifBlank { "und" },
+            targetLanguage = "en",
+            bookType = BookType.LOCAL,
+            localFilePath = sourceEpubFile.absolutePath
+        )
+        database.bookDao().insertBook(book)
+        database.groupDao().insertCrossRef(
+            BookGroupCrossRefEntity(bookId = bookId, groupId = "default_local")
+        )
+
+        // 5. Parse TOC chapter titles and insert ChapterEntities
+        val tocTitles = EpubParser.extractTocChapterTitles(sourceEpubFile, quickInfo)
+        ZipFile(sourceEpubFile).use { zip ->
+            val chapters = quickInfo.spine.mapIndexed { index, spineItem ->
+                val title = EpubParser.resolveChapterTitle(
+                    zip = zip,
+                    opfDir = quickInfo.opfDirectory,
+                    href = spineItem.href,
+                    chapterOrder = index,
+                    tocTitles = tocTitles
+                )
+                ChapterEntity(
+                    id = UUID.randomUUID().toString(),
+                    bookId = bookId,
+                    chapterOrder = index,
+                    originalHref = spineItem.href,
+                    title = title,
+                    chunkCount = 0
+                )
+            }
+            database.chapterDao().insertChapters(chapters)
+        }
+
+        book
+    }
+
+    fun addEpubToLibrary(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val book = addEpubToLibraryInternal(uri)
+                _message.value = "Added '${book.title}' to library"
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "Failed to add EPUB to library", e)
+                _message.value = "Failed to add to library: ${e.message}"
+            }
+        }
+    }
+
+    fun addPreviewedBookToLibrary() {
+        val state = _previewState.value ?: return
+        viewModelScope.launch {
+            try {
+                closePreview()
+                val book = addEpubToLibraryInternal(state.uri, state.fileName)
+                _message.value = "Added '${book.title}' to library"
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "Failed to add previewed book to library", e)
+                _message.value = "Failed to add to library: ${e.message}"
+            }
+        }
+    }
+
+    fun importMultipleEpubsToLibrary(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            var count = 0
+            for (uri in uris) {
+                try {
+                    addEpubToLibraryInternal(uri)
+                    count++
+                } catch (e: Exception) {
+                    android.util.Log.e("MainViewModel", "Error adding EPUB to library", e)
+                }
+            }
+            if (count > 0) {
+                _message.value = "Added $count book${if (count > 1) "s" else ""} to library"
             }
         }
     }
@@ -198,6 +339,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val job = database.jobDao().getJobByBookId(bookId)
                 val bookDir = File(getApplication<Application>().filesDir, "books/$bookId")
                 val sourceEpubFile = File(bookDir, "source.epub")
+
+                if (book != null && (book.isLocalBook || job == null)) {
+                    val src = book.localFilePath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
+                        ?: sourceEpubFile
+                    if (!src.exists() || src.length() == 0L) {
+                        _message.value = "Cannot export: EPUB file not found"
+                        return@launch
+                    }
+                    val outputStream = context.contentResolver.openOutputStream(destinationUri)
+                        ?: throw IllegalStateException("Could not open destination document for writing")
+                    outputStream.use { output ->
+                        src.inputStream().use { input ->
+                            input.copyTo(output, bufferSize = 32 * 1024)
+                        }
+                    }
+                    _message.value = "EPUB exported successfully!"
+                    return@launch
+                }
 
                 var exportFile = if (!exportedFilePath.isNullOrBlank()) File(exportedFilePath) else null
 
@@ -272,12 +431,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val book = db.bookDao().getBookById(bookId)
                     ?: throw IllegalArgumentException("Book not found: $bookId")
                 val job = db.jobDao().getJobByBookId(bookId)
-                    ?: throw IllegalArgumentException("No translation job found for book: $bookId")
 
                 val bookDir = File(getApplication<Application>().filesDir, "books/$bookId")
-                val sourceFile = File(bookDir, "source.epub")
+                val sourceFile = book.localFilePath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
+                    ?: File(bookDir, "source.epub")
                 if (!sourceFile.exists() || sourceFile.length() == 0L) {
                     throw IllegalStateException("Original EPUB source file is missing from local storage")
+                }
+
+                if (book.isLocalBook || job == null) {
+                    val outputStream = context.contentResolver.openOutputStream(destinationUri)
+                        ?: throw IllegalStateException("Could not open destination document for writing")
+                    outputStream.use { output ->
+                        sourceFile.inputStream().use { input ->
+                            input.copyTo(output, bufferSize = 32 * 1024)
+                        }
+                    }
+                    _message.value = "EPUB exported successfully!"
+                    return@launch
                 }
 
                 val exportDir = File(context.filesDir, "exports")
@@ -374,6 +545,144 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (result.isFailure) {
                 _updateProgress.value = null
                 _message.value = "Failed to download update: ${result.exceptionOrNull()?.message}"
+            }
+        }
+    }
+
+    fun createGroup(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch {
+            val currentGroups = database.groupDao().getAllGroups()
+            val maxOrder = currentGroups.maxOfOrNull { it.sortOrder } ?: 0
+            val group = LibraryGroupEntity(
+                id = UUID.randomUUID().toString(),
+                name = trimmed,
+                sortOrder = maxOrder + 1,
+                isSystemGroup = false,
+                systemKey = null
+            )
+            database.groupDao().insertGroup(group)
+            _message.value = "Created group '$trimmed'"
+        }
+    }
+
+    fun renameGroup(groupId: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch {
+            val group = database.groupDao().getGroupById(groupId) ?: return@launch
+            if (!group.isSystemGroup) {
+                database.groupDao().renameGroup(groupId, trimmed)
+                _message.value = "Renamed to '$trimmed'"
+            }
+        }
+    }
+
+    fun deleteGroup(groupId: String) {
+        viewModelScope.launch {
+            val group = database.groupDao().getGroupById(groupId) ?: return@launch
+            if (!group.isSystemGroup) {
+                database.groupDao().deleteCrossRefsByGroup(groupId)
+                database.groupDao().deleteGroup(groupId)
+                _message.value = "Deleted group '${group.name}'"
+            }
+        }
+    }
+
+    fun toggleBookGroup(bookId: String, groupId: String, add: Boolean) {
+        viewModelScope.launch {
+            if (add) {
+                database.groupDao().insertCrossRef(BookGroupCrossRefEntity(bookId = bookId, groupId = groupId))
+            } else {
+                database.groupDao().deleteCrossRef(bookId = bookId, groupId = groupId)
+            }
+        }
+    }
+
+    fun setBookGroups(bookId: String, selectedGroupIds: Set<String>) {
+        viewModelScope.launch {
+            val current = database.groupDao().getGroupIdsForBook(bookId).toSet()
+            val toAdd = selectedGroupIds - current
+            val toRemove = current - selectedGroupIds
+            for (g in toAdd) {
+                database.groupDao().insertCrossRef(BookGroupCrossRefEntity(bookId = bookId, groupId = g))
+            }
+            for (g in toRemove) {
+                database.groupDao().deleteCrossRef(bookId = bookId, groupId = g)
+            }
+        }
+    }
+
+    fun observeBookmarkedChapterIds(bookId: String): Flow<List<String>> {
+        return database.bookmarkDao().observeBookmarkedChapterIds(bookId)
+    }
+
+    fun observeIsChapterBookmarked(bookId: String, chapterId: String): Flow<Boolean> {
+        return database.bookmarkDao().observeIsBookmarked(bookId, chapterId)
+    }
+
+    fun toggleBookmark(bookId: String, chapterId: String) {
+        viewModelScope.launch {
+            val exists = database.bookmarkDao().isBookmarked(bookId, chapterId)
+            if (exists) {
+                database.bookmarkDao().deleteBookmark(bookId, chapterId)
+            } else {
+                database.bookmarkDao().insertBookmark(
+                    ChapterBookmarkEntity(
+                        id = UUID.randomUUID().toString(),
+                        bookId = bookId,
+                        chapterId = chapterId
+                    )
+                )
+            }
+        }
+    }
+
+    private suspend fun syncTtsRulesToMemory() {
+        val app = getApplication<Application>() as? TranslatorApplication
+        val all = database.ttsRuleDao().getAllRules().map { it.toModel() }
+        app?.ttsTextProcessor?.setRules(all)
+    }
+
+    fun saveTtsRule(rule: TtsRule) {
+        viewModelScope.launch {
+            database.ttsRuleDao().insertRule(rule.toEntity())
+            syncTtsRulesToMemory()
+        }
+    }
+
+    fun deleteTtsRule(ruleId: String) {
+        viewModelScope.launch {
+            database.ttsRuleDao().deleteRuleById(ruleId)
+            syncTtsRulesToMemory()
+        }
+    }
+
+    fun toggleTtsRule(ruleId: String) {
+        viewModelScope.launch {
+            val entity = database.ttsRuleDao().getRuleById(ruleId) ?: return@launch
+            database.ttsRuleDao().updateRule(entity.copy(isEnabled = !entity.isEnabled))
+            syncTtsRulesToMemory()
+        }
+    }
+
+    fun reorderTtsRule(ruleId: String, moveUp: Boolean) {
+        viewModelScope.launch {
+            val rules = database.ttsRuleDao().getAllRules().toMutableList()
+            val index = rules.indexOfFirst { it.id == ruleId }
+            if (index < 0) return@launch
+            val targetIndex = if (moveUp) index - 1 else index + 1
+            if (targetIndex in rules.indices) {
+                val temp = rules[index]
+                rules[index] = rules[targetIndex]
+                rules[targetIndex] = temp
+
+                val updated = rules.mapIndexed { idx, entity ->
+                    entity.copy(sortOrder = idx)
+                }
+                database.ttsRuleDao().insertRules(updated)
+                syncTtsRulesToMemory()
             }
         }
     }

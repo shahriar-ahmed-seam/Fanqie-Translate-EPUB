@@ -239,3 +239,116 @@ interface TranslationChunkDao {
     @Query("DELETE FROM translation_chunks WHERE bookId = :bookId")
     suspend fun deleteChunksByBook(bookId: String)
 }
+
+@Dao
+interface LibraryGroupDao {
+    @Query("SELECT * FROM library_groups ORDER BY sortOrder ASC, createdAt ASC")
+    fun observeAllGroups(): Flow<List<LibraryGroupEntity>>
+
+    @Query("SELECT * FROM library_groups ORDER BY sortOrder ASC, createdAt ASC")
+    suspend fun getAllGroups(): List<LibraryGroupEntity>
+
+    @Query("SELECT * FROM library_groups WHERE id = :id LIMIT 1")
+    suspend fun getGroupById(id: String): LibraryGroupEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertGroup(group: LibraryGroupEntity)
+
+    @Update
+    suspend fun updateGroup(group: LibraryGroupEntity)
+
+    @Query("UPDATE library_groups SET name = :name WHERE id = :id AND isSystemGroup = 0")
+    suspend fun renameGroup(id: String, name: String)
+
+    @Query("DELETE FROM library_groups WHERE id = :id AND isSystemGroup = 0")
+    suspend fun deleteGroup(id: String)
+
+    @Query("SELECT groupId FROM book_group_cross_ref WHERE bookId = :bookId")
+    fun observeGroupIdsForBook(bookId: String): Flow<List<String>>
+
+    @Query("SELECT groupId FROM book_group_cross_ref WHERE bookId = :bookId")
+    suspend fun getGroupIdsForBook(bookId: String): List<String>
+
+    @Query("SELECT bookId FROM book_group_cross_ref WHERE groupId = :groupId")
+    fun observeBookIdsInGroup(groupId: String): Flow<List<String>>
+
+    @Query("SELECT bookId FROM book_group_cross_ref WHERE groupId = :groupId")
+    suspend fun getBookIdsInGroup(groupId: String): List<String>
+
+    @Query("SELECT * FROM book_group_cross_ref")
+    fun observeAllCrossRefs(): Flow<List<BookGroupCrossRefEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCrossRef(crossRef: BookGroupCrossRefEntity)
+
+    @Query("DELETE FROM book_group_cross_ref WHERE bookId = :bookId AND groupId = :groupId")
+    suspend fun deleteCrossRef(bookId: String, groupId: String)
+
+    @Query("DELETE FROM book_group_cross_ref WHERE bookId = :bookId")
+    suspend fun deleteCrossRefsByBook(bookId: String)
+
+    @Query("DELETE FROM book_group_cross_ref WHERE groupId = :groupId")
+    suspend fun deleteCrossRefsByGroup(groupId: String)
+}
+
+@Dao
+interface BookmarkDao {
+    @Query("SELECT chapterId FROM chapter_bookmarks WHERE bookId = :bookId")
+    fun observeBookmarkedChapterIds(bookId: String): Flow<List<String>>
+
+    @Query("SELECT chapterId FROM chapter_bookmarks WHERE bookId = :bookId")
+    suspend fun getBookmarkedChapterIds(bookId: String): List<String>
+
+    @Query("SELECT * FROM chapter_bookmarks WHERE bookId = :bookId ORDER BY createdAt DESC")
+    fun observeBookmarksByBook(bookId: String): Flow<List<ChapterBookmarkEntity>>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM chapter_bookmarks WHERE bookId = :bookId AND chapterId = :chapterId)")
+    fun observeIsBookmarked(bookId: String, chapterId: String): Flow<Boolean>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM chapter_bookmarks WHERE bookId = :bookId AND chapterId = :chapterId)")
+    suspend fun isBookmarked(bookId: String, chapterId: String): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertBookmark(bookmark: ChapterBookmarkEntity)
+
+    @Query("DELETE FROM chapter_bookmarks WHERE bookId = :bookId AND chapterId = :chapterId")
+    suspend fun deleteBookmark(bookId: String, chapterId: String)
+
+    @Query("DELETE FROM chapter_bookmarks WHERE bookId = :bookId")
+    suspend fun deleteBookmarksByBook(bookId: String)
+}
+
+@Dao
+interface TtsRuleDao {
+    @Query("SELECT * FROM tts_rules ORDER BY sortOrder ASC, createdAt ASC")
+    fun observeAllRules(): Flow<List<TtsRuleEntity>>
+
+    @Query("SELECT * FROM tts_rules ORDER BY sortOrder ASC, createdAt ASC")
+    suspend fun getAllRules(): List<TtsRuleEntity>
+
+    @Query("SELECT * FROM tts_rules WHERE bookId IS NULL OR bookId = :bookId ORDER BY sortOrder ASC, createdAt ASC")
+    fun observeRulesForBook(bookId: String): Flow<List<TtsRuleEntity>>
+
+    @Query("SELECT * FROM tts_rules WHERE id = :id LIMIT 1")
+    suspend fun getRuleById(id: String): TtsRuleEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRule(rule: TtsRuleEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRules(rules: List<TtsRuleEntity>)
+
+    @Update
+    suspend fun updateRule(rule: TtsRuleEntity)
+
+    @Delete
+    suspend fun deleteRule(rule: TtsRuleEntity)
+
+    @Query("DELETE FROM tts_rules WHERE id = :id")
+    suspend fun deleteRuleById(id: String)
+
+    @Query("DELETE FROM tts_rules WHERE bookId = :bookId")
+    suspend fun deleteRulesByBook(bookId: String)
+}
+
+

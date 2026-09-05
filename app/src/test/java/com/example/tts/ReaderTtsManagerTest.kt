@@ -21,6 +21,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.Locale
+import com.example.tts.rule.TtsRule
+import com.example.tts.rule.TtsRuleType
+import com.example.tts.rule.TtsTextProcessor
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -760,5 +763,155 @@ class ReaderTtsManagerTest {
         // Should not crash, and should keep manager in valid state
         assertNotEquals(TtsState.ERROR, manager.ttsState.value)
         assertNull(manager.errorMessage.value)
+    }
+
+    @Test
+    fun testTextProcessorAppliesSkipAndReplaceRulesBeforeSpeaking() {
+        val fakeClient = FakeTtsClient()
+        val processor = TtsTextProcessor()
+        processor.setRules(listOf(
+            TtsRule(pattern = "Tomato", ruleType = TtsRuleType.SKIP, wholeWord = true),
+            TtsRule(pattern = "cultivation", replacement = "training", ruleType = TtsRuleType.REPLACE)
+        ))
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = testScope,
+            clientFactory = { fakeClient },
+            textProcessor = processor
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        val originalText = "Tomato brings deep cultivation techniques."
+        val inputList = listOf(originalText)
+        manager.setParagraphs(inputList)
+        manager.play(0)
+
+        // Android TTS receives processed text
+        assertEquals(1, fakeClient.spokenTexts.size)
+        assertEquals("brings deep training techniques.", fakeClient.spokenTexts.first())
+
+        // Input text remains 100% untouched
+        assertEquals(originalText, inputList[0])
+    }
+
+    @Test
+    fun testParagraphEntirelySkippedByRuleAutoAdvances() {
+        val fakeClient = FakeTtsClient()
+        val processor = TtsTextProcessor()
+        processor.setRules(listOf(
+            TtsRule(pattern = "\\[.*?\\]", ruleType = TtsRuleType.SKIP_REGEX, isRegex = true)
+        ))
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = testScope,
+            clientFactory = { fakeClient },
+            textProcessor = processor
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Paragraph 0 is an ad that regex skips completely
+        manager.setParagraphs(listOf("[Advertisement: Download our novel app]", "Chapter 1: The Adventure Begins"))
+        manager.play(0)
+
+        // Should automatically advance to paragraph 1
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals(1, fakeClient.spokenTexts.size)
+        assertEquals("Chapter 1: The Adventure Begins", fakeClient.spokenTexts.first())
+    }
+
+    @Test
+    fun testPreviousParagraphSkipsParagraphsOmittedByRules() {
+        val fakeClient = FakeTtsClient()
+        val processor = TtsTextProcessor()
+        processor.setRules(listOf(
+            TtsRule(pattern = "SkipMe", ruleType = TtsRuleType.SKIP, wholeWord = true)
+        ))
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = testScope,
+            clientFactory = { fakeClient },
+            textProcessor = processor
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Valid paragraph zero", "SkipMe", "Valid paragraph two"))
+        manager.play(2)
+        assertEquals(2, manager.currentParagraphIndex.value)
+
+        manager.previousParagraph()
+
+        // Should skip index 1 because it becomes blank, landing on index 0
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals("Valid paragraph zero", fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testPauseResumePreservesSubChunkPosition() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Build text > 2500 chars so it splits into 2 chunks
+        val sentence = "This is a detailed narrative sentence that occupies space. "
+        val longParagraph = sentence.repeat(60) // ~3600 chars
+        manager.setParagraphs(listOf(longParagraph))
+
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(1, fakeClient.spokenTexts.size)
+        val firstChunk = fakeClient.spokenTexts.first()
+
+        // Simulate subchunk 0 completing -> advances to subchunk 1
+        val firstUttId = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(firstUttId)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(2, fakeClient.spokenTexts.size)
+        val secondChunk = fakeClient.spokenTexts.last()
+        assertNotEquals(firstChunk, secondChunk)
+
+        // Pause
+        manager.pause()
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+
+        // Resume: must resume speaking the second chunk, NOT restarting from chunk 0
+        manager.resume()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(3, fakeClient.spokenTexts.size)
+        assertEquals(secondChunk, fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testDynamicRuleUpdateAppliesToNextParagraphWithoutBreakingCurrent() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val processor = TtsTextProcessor()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient },
+            textProcessor = processor
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("First paragraph plays unchanged.", "Second paragraph mentions Tomato harvest."))
+        manager.play(0)
+        assertEquals("First paragraph plays unchanged.", fakeClient.spokenTexts.first())
+
+        // Dynamically add a rule in memory
+        processor.setRules(listOf(
+            TtsRule(pattern = "Tomato", ruleType = TtsRuleType.SKIP, wholeWord = true)
+        ))
+
+        // Complete utterance for paragraph 0
+        val utt0 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt0)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals("Second paragraph mentions harvest.", fakeClient.spokenTexts.last())
     }
 }

@@ -47,6 +47,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.material.icons.automirrored.filled.VolumeMute
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import java.io.File
+import com.example.epub.EpubParser
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -132,6 +134,7 @@ fun ReaderScreen(
     val ttsErrorMessage by ttsManager.errorMessage.collectAsState()
     val ttsMetadata by ttsManager.mediaMetadata.collectAsState()
     val autoAdvanceChapter by ttsManager.autoAdvanceChapter.collectAsState()
+    val isCurrentChapterBookmarked by viewModel.observeIsChapterBookmarked(bookId, currentChapterId).collectAsState(initial = false)
 
     val isCurrentChapterActiveInTts = (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) &&
             ttsMetadata.bookId == bookId && ttsMetadata.chapterId == currentChapterId
@@ -163,7 +166,9 @@ fun ReaderScreen(
 
     var showTtsControls by rememberSaveable { mutableStateOf(false) }
     var showVoiceSelectionSheet by remember { mutableStateOf(false) }
+    var showTtsRulesDialog by remember { mutableStateOf(false) }
     var shouldContinueTtsOnNextChapter by remember { mutableStateOf(false) }
+    val ttsRules by viewModel.ttsRules.collectAsState()
 
     val chapters by db.chapterDao().observeChaptersByBook(bookId).collectAsState(initial = emptyList())
     val currentChapter = chapters.firstOrNull { it.id == currentChapterId }
@@ -236,43 +241,61 @@ fun ReaderScreen(
         lastSavedParaIndex = savedPara
 
         withContext(Dispatchers.IO) {
+            val book = db.bookDao().getBookById(bookId)
             val job = db.jobDao().getJobByBookId(bookId)
             val chapter = db.chapterDao().getChapterById(currentChapterId)
 
             if (chapter != null) {
-                val chunks = if (job != null) {
-                    db.chunkDao().getChunksByJobAndChapter(job.id, currentChapterId)
+                if (book?.isLocalBook == true || (job == null && book?.localFilePath != null)) {
+                    chapterTitle = if (chapter.title.isNotBlank()) chapter.title else "Chapter ${chapter.chapterOrder + 1}"
+                    val bookDir = File(context.filesDir, "books/$bookId")
+                    val epubFile = book?.localFilePath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
+                        ?: File(bookDir, "source.epub")
+                    if (epubFile.exists() && epubFile.length() > 0L) {
+                        val extractedParas = EpubParser.extractChapterParagraphs(epubFile, chapter.originalHref)
+                        if (extractedParas.isNotEmpty()) {
+                            paragraphs = extractedParas
+                        } else {
+                            paragraphs = listOf("This chapter is empty.")
+                        }
+                    } else {
+                        paragraphs = listOf("Source EPUB file not found.")
+                    }
                 } else {
-                    db.chunkDao().getChunksByChapter(bookId, currentChapterId)
-                }
+                    val chunks = if (job != null) {
+                        db.chunkDao().getChunksByJobAndChapter(job.id, currentChapterId)
+                    } else {
+                        db.chunkDao().getChunksByChapter(bookId, currentChapterId)
+                    }
 
-                val titleChunk = chunks.firstOrNull { it.chunkType == "CHAPTER_TITLE" }
-                val resolvedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() }
-                    ?: chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() }
-                    ?: if (chapter.title.any { it.code in 0x4e00..0x9fff }) "Chapter ${chapter.chapterOrder + 1}" else chapter.title
-                chapterTitle = resolvedTitle
+                    val titleChunk = chunks.firstOrNull { it.chunkType == "CHAPTER_TITLE" }
+                    val resolvedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() }
+                        ?: chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() }
+                        ?: if (chapter.title.any { it.code in 0x4e00..0x9fff }) "Chapter ${chapter.chapterOrder + 1}" else chapter.title
+                    chapterTitle = resolvedTitle
 
-                val bodyChunks = chunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
-                if (bodyChunks.isNotEmpty()) {
-                    val extractedParagraphs = mutableListOf<String>()
-                    for (chunk in bodyChunks) {
-                        // Strict requirement: Only translated English text is displayed. Never fall back to Chinese source text.
-                        val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: continue
-                        val rawParas = text.split(Regex("(\r?\n)+|<p[^>]*>|</p>|<br\\s*/?>"))
-                        for (p in rawParas) {
-                            val clean = p.replace(Regex("<[^>]+>"), "").trim()
-                            if (clean.isNotBlank()) {
-                                extractedParagraphs.add(clean)
+                    val bodyChunks = chunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
+                    if (bodyChunks.isNotEmpty()) {
+                        val extractedParagraphs = mutableListOf<String>()
+                        for (chunk in bodyChunks) {
+                            // Strict requirement: Only translated English text is displayed. Never fall back to Chinese source text.
+                            val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: continue
+                            val rawParas = text.split(Regex("(\r?\n)+|<p[^>]*>|</p>|<br\\s*/?>"))
+                            for (p in rawParas) {
+                                val clean = p.replace(Regex("<[^>]+>"), "").trim()
+                                if (clean.isNotBlank()) {
+                                    extractedParagraphs.add(clean)
+                                }
                             }
                         }
-                    }
-                    if (extractedParagraphs.isNotEmpty()) {
-                        paragraphs = extractedParagraphs
+                        if (extractedParagraphs.isNotEmpty()) {
+                            paragraphs = extractedParagraphs
+                        } else {
+                            paragraphs = listOf("This chapter has not been translated yet. Please wait for translation to complete.")
+                        }
                     } else {
                         paragraphs = listOf("This chapter has not been translated yet. Please wait for translation to complete.")
                     }
-                } else {
-                    paragraphs = listOf("This chapter has not been translated yet. Please wait for translation to complete.")
                 }
             }
         }
@@ -411,6 +434,17 @@ fun ReaderScreen(
                             imageVector = if (!isTtsEnabled) Icons.AutoMirrored.Filled.VolumeMute else if (showTtsControls || ttsState == TtsState.PLAYING) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeMute,
                             contentDescription = if (!isTtsEnabled) "Enable Text to Speech" else "Text to Speech Controls",
                             tint = if (!isTtsEnabled) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f) else if (ttsState == TtsState.PLAYING) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { viewModel.toggleBookmark(bookId, currentChapterId) },
+                        modifier = Modifier.testTag("reader_bookmark_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isCurrentChapterBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                            contentDescription = if (isCurrentChapterBookmarked) "Remove Bookmark" else "Bookmark Chapter",
+                            tint = if (isCurrentChapterBookmarked) MaterialTheme.colorScheme.primary else LocalContentColor.current
                         )
                     }
 
@@ -555,6 +589,21 @@ fun ReaderScreen(
                                             contentDescription = "Select Voice",
                                             modifier = Modifier.size(20.dp),
                                             tint = if (selectedVoice != null && isTtsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { showTtsRulesDialog = true },
+                                        enabled = isTtsEnabled,
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .testTag("reader_tts_rules_button")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Spellcheck,
+                                            contentDescription = "TTS Speech Rules",
+                                            modifier = Modifier.size(20.dp),
+                                            tint = if (isTtsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                                         )
                                     }
 
@@ -1149,5 +1198,17 @@ fun ReaderScreen(
                 }
             }
         }
+    }
+
+    if (showTtsRulesDialog) {
+        TtsRulesDialog(
+            rules = ttsRules,
+            currentBookId = bookId,
+            onDismiss = { showTtsRulesDialog = false },
+            onSaveRule = { viewModel.saveTtsRule(it) },
+            onDeleteRule = { viewModel.deleteTtsRule(it) },
+            onToggleRule = { viewModel.toggleTtsRule(it) },
+            onReorderRule = { id, up -> viewModel.reorderTtsRule(id, up) }
+        )
     }
 }

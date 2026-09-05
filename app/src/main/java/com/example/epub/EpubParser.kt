@@ -480,4 +480,156 @@ object EpubParser {
         }
         return result
     }
+
+    /**
+     * Extracts chapter titles from NCX (EPUB 2) or Nav XHTML (EPUB 3) table of contents.
+     * Returns a map with keys matching both relative href, resolved full zip path, and base filename.
+     */
+    fun extractTocChapterTitles(epubFile: File, quickInfo: EpubQuickInfo): Map<String, String> {
+        if (!epubFile.exists() || epubFile.length() == 0L) return emptyMap()
+        val titlesMap = mutableMapOf<String, String>()
+
+        try {
+            ZipFile(epubFile).use { zip ->
+                val opfDir = quickInfo.opfDirectory
+
+                // 1. Try NCX TOC
+                val ncxHref = quickInfo.ncxHref
+                if (!ncxHref.isNullOrBlank()) {
+                    val fullNcxPath = resolveZipPath(opfDir, ncxHref)
+                    val ncxEntry = findZipEntry(zip, fullNcxPath) ?: findZipEntry(zip, ncxHref)
+                    if (ncxEntry != null) {
+                        val ncxXml = zip.getInputStream(ncxEntry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                        val doc = Jsoup.parse(ncxXml, "", Parser.xmlParser())
+                        val navPoints = doc.select("navPoint")
+                        for (np in navPoints) {
+                            val text = np.select("navLabel > text").firstOrNull()?.text()?.trim()
+                            val src = np.select("content").firstOrNull()?.attr("src")?.substringBefore('#')?.trim()
+                            if (!text.isNullOrBlank() && !src.isNullOrBlank()) {
+                                titlesMap[src] = text
+                                titlesMap[resolveZipPath(opfDir, src)] = text
+                                val baseName = src.substringAfterLast('/')
+                                if (!titlesMap.containsKey(baseName)) {
+                                    titlesMap[baseName] = text
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Try Nav HTML TOC (EPUB 3)
+                val navHref = quickInfo.navHref
+                if (!navHref.isNullOrBlank()) {
+                    val fullNavPath = resolveZipPath(opfDir, navHref)
+                    val navEntry = findZipEntry(zip, fullNavPath) ?: findZipEntry(zip, navHref)
+                    if (navEntry != null) {
+                        val navHtml = zip.getInputStream(navEntry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                        val doc = Jsoup.parse(navHtml, "", Parser.htmlParser())
+                        val navLinks = doc.select("nav[epub\\:type=toc] a[href], nav#toc a[href], nav a[href]")
+                        for (a in navLinks) {
+                            val text = a.text().trim()
+                            val href = a.attr("href").substringBefore('#').trim()
+                            if (text.isNotBlank() && href.isNotBlank()) {
+                                if (!titlesMap.containsKey(href)) {
+                                    titlesMap[href] = text
+                                }
+                                val resolved = resolveZipPath(opfDir, href)
+                                if (!titlesMap.containsKey(resolved)) {
+                                    titlesMap[resolved] = text
+                                }
+                                val baseName = href.substringAfterLast('/')
+                                if (!titlesMap.containsKey(baseName)) {
+                                    titlesMap[baseName] = text
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("EpubParser", "Failed to extract TOC chapter titles", e)
+        }
+
+        return titlesMap
+    }
+
+    /**
+     * Peeks the title or first heading tag from a chapter's XHTML file.
+     */
+    fun extractChapterTitleFromEntry(zip: ZipFile, opfDir: String, chapterHref: String): String? {
+        val fullPath = resolveZipPath(opfDir, chapterHref)
+        val entry = findZipEntry(zip, fullPath) ?: findZipEntry(zip, chapterHref) ?: return null
+        return try {
+            val rawXhtml = zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val doc = Jsoup.parse(rawXhtml, "", Parser.htmlParser())
+            val heading = doc.select("h1, h2, h3, title").firstOrNull()?.text()?.trim()
+            heading?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Resolves the best available title for a chapter:
+     * 1. Checks TOC map (NCX / Nav)
+     * 2. Checks entry heading
+     * 3. Falls back to "Chapter ${chapterOrder + 1}"
+     */
+    fun resolveChapterTitle(
+        zip: ZipFile?,
+        opfDir: String,
+        href: String,
+        chapterOrder: Int,
+        tocTitles: Map<String, String>
+    ): String {
+        val titleFromToc = tocTitles[href]
+            ?: tocTitles[resolveZipPath(opfDir, href)]
+            ?: tocTitles[href.substringAfterLast('/')]
+        if (!titleFromToc.isNullOrBlank()) {
+            return titleFromToc
+        }
+        if (zip != null) {
+            val entryTitle = extractChapterTitleFromEntry(zip, opfDir, href)
+            if (!entryTitle.isNullOrBlank()) {
+                return entryTitle
+            }
+        }
+        return "Chapter ${chapterOrder + 1}"
+    }
+
+    /**
+     * Extracts readable text paragraphs directly from a stored EPUB on disk for the given chapter.
+     * Guaranteed O(1) memory footprint for large novels since only one entry is decompressed at a time.
+     */
+    fun extractChapterParagraphs(epubFile: File, chapterHref: String): List<String> {
+        if (!epubFile.exists() || epubFile.length() == 0L) return emptyList()
+        return try {
+            ZipFile(epubFile).use { zip ->
+                var opfDir = ""
+                val containerEntry = findZipEntry(zip, "META-INF/container.xml")
+                if (containerEntry != null) {
+                    val containerXml = zip.getInputStream(containerEntry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val containerDoc = Jsoup.parse(containerXml, "", Parser.xmlParser())
+                    val rootfile = containerDoc.select("rootfiles > rootfile").first()
+                    val opfPath = rootfile?.attr("full-path")?.replace('\\', '/') ?: ""
+                    if (opfPath.contains('/')) {
+                        opfDir = opfPath.substringBeforeLast('/')
+                    }
+                }
+
+                val fullPath = resolveZipPath(opfDir, chapterHref)
+                val entry = findZipEntry(zip, fullPath)
+                    ?: findZipEntry(zip, chapterHref)
+                    ?: findZipEntry(zip, chapterHref.substringAfterLast('/'))
+                    ?: return emptyList()
+
+                val rawXhtml = zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val doc = Jsoup.parse(rawXhtml, "", Parser.htmlParser())
+                extractTranslatableParagraphs(doc)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("EpubParser", "Failed to extract chapter paragraphs for $chapterHref", e)
+            emptyList()
+        }
+    }
 }

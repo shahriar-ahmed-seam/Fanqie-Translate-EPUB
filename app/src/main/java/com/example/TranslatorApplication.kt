@@ -2,9 +2,11 @@ package com.example
 
 import android.app.Application
 import com.example.data.db.AppDatabase
+import com.example.data.db.toModel
 import com.example.data.repository.SettingsRepository
 import com.example.queue.TranslationQueueManager
 import com.example.service.TranslationService
+import kotlinx.coroutines.launch
 
 class TranslatorApplication : Application() {
 
@@ -15,6 +17,9 @@ class TranslatorApplication : Application() {
         private set
 
     lateinit var queueManager: TranslationQueueManager
+        private set
+
+    lateinit var ttsTextProcessor: com.example.tts.rule.TtsTextProcessor
         private set
 
     lateinit var ttsManager: com.example.tts.ReaderTtsManager
@@ -31,7 +36,17 @@ class TranslatorApplication : Application() {
         database = AppDatabase.getInstance(this)
         settingsRepository = SettingsRepository(this)
         queueManager = TranslationQueueManager(this, database, settingsRepository)
-        ttsManager = com.example.tts.ReaderTtsManager(this).apply {
+        ttsTextProcessor = com.example.tts.rule.TtsTextProcessor()
+
+        // Keep text processor synchronized with persisted TTS rules in Room
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            database.ttsRuleDao().observeAllRules().collect { entities ->
+                val models = entities.map { it.toModel() }
+                ttsTextProcessor.setRules(models)
+            }
+        }
+
+        ttsManager = com.example.tts.ReaderTtsManager(this, textProcessor = ttsTextProcessor).apply {
             setTtsEnabled(settingsRepository.isTtsEnabled())
             setSpeechRate(settingsRepository.getTtsSpeechRate())
             setAutoAdvanceChapter(settingsRepository.isTtsAutoAdvanceChapterEnabled())

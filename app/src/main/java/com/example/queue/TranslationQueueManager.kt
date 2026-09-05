@@ -637,6 +637,9 @@ class TranslationQueueManager(
             database.withTransaction {
                 database.bookDao().insertBook(bookEntity)
                 database.jobDao().insertJob(jobEntity)
+                database.groupDao().insertCrossRef(
+                    com.example.data.db.BookGroupCrossRefEntity(bookId = bookId, groupId = "default_translated")
+                )
             }
 
             _importProgress.value = null
@@ -655,6 +658,9 @@ class TranslationQueueManager(
         try {
             database.chunkDao().deleteChunksByJob(jobId)
             database.chapterDao().deleteChaptersByBook(bookId)
+            database.groupDao().deleteCrossRefsByBook(bookId)
+            database.bookmarkDao().deleteBookmarksByBook(bookId)
+            database.ttsRuleDao().deleteRulesByBook(bookId)
             database.jobDao().deleteJobById(jobId)
             database.bookDao().deleteBookById(bookId)
             if (bookDir.exists()) {
@@ -903,6 +909,9 @@ class TranslationQueueManager(
             database.jobDao().deleteJobById(job.id)
         }
         database.chapterDao().deleteChaptersByBook(bookId)
+        database.groupDao().deleteCrossRefsByBook(bookId)
+        database.bookmarkDao().deleteBookmarksByBook(bookId)
+        database.ttsRuleDao().deleteRulesByBook(bookId)
         database.bookDao().deleteBookById(bookId)
 
         // Delete local files
