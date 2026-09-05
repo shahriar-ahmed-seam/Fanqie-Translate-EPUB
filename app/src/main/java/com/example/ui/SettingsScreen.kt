@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -28,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
@@ -416,7 +418,18 @@ fun SettingsScreen(
 
                     // 3. Resume TTS automatically
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .toggleable(
+                                value = autoResumePlayback,
+                                onValueChange = {
+                                    autoResumePlayback = it
+                                    settingsRepo.setTtsAutoResumePlaybackEnabled(it)
+                                },
+                                role = Role.Switch
+                            )
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -435,17 +448,26 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Switch(
                             checked = autoResumePlayback,
-                            onCheckedChange = {
-                                autoResumePlayback = it
-                                settingsRepo.setTtsAutoResumePlaybackEnabled(it)
-                            },
+                            onCheckedChange = null,
                             modifier = Modifier.testTag("tts_auto_resume_switch")
                         )
                     }
 
                     // 4. Continue to next chapter
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .toggleable(
+                                value = autoAdvanceChapter,
+                                onValueChange = {
+                                    autoAdvanceChapter = it
+                                    settingsRepo.setTtsAutoAdvanceChapterEnabled(it)
+                                    ttsManager?.setAutoAdvanceChapter(it)
+                                },
+                                role = Role.Switch
+                            )
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -464,11 +486,7 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Switch(
                             checked = autoAdvanceChapter,
-                            onCheckedChange = {
-                                autoAdvanceChapter = it
-                                settingsRepo.setTtsAutoAdvanceChapterEnabled(it)
-                                ttsManager?.setAutoAdvanceChapter(it)
-                            },
+                            onCheckedChange = null,
                             modifier = Modifier.testTag("tts_auto_advance_switch")
                         )
                     }
@@ -656,14 +674,22 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .toggleable(
+                                value = autoCheckUpdates,
+                                onValueChange = { autoCheckUpdates = it },
+                                role = Role.Switch
+                            )
+                            .padding(vertical = 6.dp, horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text("Auto-check on startup", style = MaterialTheme.typography.bodyMedium)
                         Switch(
                             checked = autoCheckUpdates,
-                            onCheckedChange = { autoCheckUpdates = it }
+                            onCheckedChange = null
                         )
                     }
 

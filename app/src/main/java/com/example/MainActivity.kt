@@ -147,6 +147,7 @@ fun MainApp(
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
     val exportingBookIds by viewModel.exportingBookIds.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val libraryViewMode by viewModel.libraryViewMode.collectAsStateWithLifecycle()
     val previewState by viewModel.previewState.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val updateProgress by viewModel.updateProgress.collectAsStateWithLifecycle()
@@ -280,6 +281,8 @@ fun MainApp(
                         libraryGroups = libraryGroups,
                         bookGroupCrossRefs = bookGroupCrossRefs,
                         exportingBookIds = exportingBookIds,
+                        viewMode = libraryViewMode,
+                        onToggleViewMode = { viewModel.setLibraryViewMode(it) },
                         onAddToLibrary = { viewModel.previewSingleEpub(it, isLibraryIntent = true) },
                         onCreateGroup = { viewModel.createGroup(it) },
                         onRenameGroup = { id, name -> viewModel.renameGroup(id, name) },

@@ -7,7 +7,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -25,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -546,7 +550,7 @@ fun ReaderScreen(
                                             settingsRepo.setTtsEnabled(next)
                                         },
                                         modifier = Modifier
-                                            .size(36.dp)
+                                            .size(40.dp)
                                             .testTag("reader_tts_master_toggle")
                                     ) {
                                         Icon(
@@ -566,7 +570,7 @@ fun ReaderScreen(
                                         },
                                         enabled = isTtsEnabled,
                                         modifier = Modifier
-                                            .size(36.dp)
+                                            .size(40.dp)
                                             .testTag("reader_tts_auto_advance_button")
                                     ) {
                                         Icon(
@@ -581,7 +585,7 @@ fun ReaderScreen(
                                         onClick = { showVoiceSelectionSheet = true },
                                         enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING,
                                         modifier = Modifier
-                                            .size(36.dp)
+                                            .size(40.dp)
                                             .testTag("reader_tts_voice_button")
                                     ) {
                                         Icon(
@@ -596,7 +600,7 @@ fun ReaderScreen(
                                         onClick = { showTtsRulesDialog = true },
                                         enabled = isTtsEnabled,
                                         modifier = Modifier
-                                            .size(36.dp)
+                                            .size(40.dp)
                                             .testTag("reader_tts_rules_button")
                                     ) {
                                         Icon(
@@ -612,13 +616,13 @@ fun ReaderScreen(
                                         FilledTonalButton(
                                             onClick = { showSpeedMenu = true },
                                             enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING,
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                             modifier = Modifier
-                                                .height(32.dp)
+                                                .height(36.dp)
                                                 .testTag("reader_tts_speed_button")
                                         ) {
                                             Text(
-                                                text = String.format(Locale.US, "%.2gx", speechRate),
+                                                text = "${speechRate}x",
                                                 style = MaterialTheme.typography.labelMedium,
                                                 fontWeight = FontWeight.Bold
                                             )
@@ -652,10 +656,10 @@ fun ReaderScreen(
                                     IconButton(
                                         onClick = { showTtsControls = false },
                                         modifier = Modifier
-                                            .size(32.dp)
+                                            .size(40.dp)
                                             .testTag("reader_tts_close_button")
                                     ) {
-                                        Icon(Icons.Default.Close, contentDescription = "Hide TTS Controls", modifier = Modifier.size(18.dp))
+                                        Icon(Icons.Default.Close, contentDescription = "Hide TTS Controls", modifier = Modifier.size(20.dp))
                                     }
                                 }
                             }
@@ -798,7 +802,7 @@ fun ReaderScreen(
                             enabled = prevChapter != null,
                             modifier = Modifier.testTag("reader_prev_chapter_button")
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Previous Chapter", modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Prev")
                         }
@@ -824,7 +828,7 @@ fun ReaderScreen(
                         ) {
                             Text("Next")
                             Spacer(modifier = Modifier.width(4.dp))
-                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Next Chapter", modifier = Modifier.size(16.dp))
                         }
                     }
                 }
@@ -938,6 +942,8 @@ fun ReaderScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .navigationBarsPadding()
                     .padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
@@ -984,16 +990,15 @@ fun ReaderScreen(
                 // Color Themes
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Theme", style = MaterialTheme.typography.bodyMedium)
-                    Row(
+                    LazyRow(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        ReaderTheme.values().forEach { theme ->
+                        items(ReaderTheme.values().toList()) { theme ->
                             FilterChip(
                                 selected = selectedTheme == theme,
                                 onClick = { selectedTheme = theme },
-                                label = { Text(theme.label) },
-                                modifier = Modifier.weight(1f)
+                                label = { Text(theme.label) }
                             )
                         }
                     }
@@ -1006,13 +1011,14 @@ fun ReaderScreen(
 
     // Chapter Picker / Table of Contents Bottom Sheet
     if (showChapterPickerSheet) {
+        val sheetHeightFraction = if (LocalConfiguration.current.screenHeightDp < 500) 0.90f else 0.72f
         ModalBottomSheet(
             onDismissRequest = { showChapterPickerSheet = false }
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .fillMaxHeight(0.7f)
+                    .fillMaxHeight(sheetHeightFraction)
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
                 if (novelTitle.isNotBlank()) {
@@ -1105,25 +1111,20 @@ fun ReaderScreen(
 
     // Voice Selection Bottom Sheet
     if (showVoiceSelectionSheet) {
+        val sheetHeightFraction = if (LocalConfiguration.current.screenHeightDp < 500) 0.88f else 0.65f
         ModalBottomSheet(
             onDismissRequest = { showVoiceSelectionSheet = false }
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .fillMaxHeight(0.6f)
+                    .fillMaxHeight(sheetHeightFraction)
                     .padding(horizontal = 20.dp, vertical = 8.dp)
             ) {
                 Text(
                     text = "Select TTS Voice",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(bottom = 4.dp)
-                )
-                Text(
-                    text = "Installed system voices for reading novel chapters",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
 

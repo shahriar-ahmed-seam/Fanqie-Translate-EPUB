@@ -18,12 +18,34 @@ data class AppSettings(
     val isDarkMode: Boolean = false
 )
 
+enum class LibraryViewMode {
+    GRID,
+    LIST
+}
+
 class SettingsRepository(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("epub_translator_settings", Context.MODE_PRIVATE)
 
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
+
+    private val _libraryViewMode = MutableStateFlow(getLibraryViewMode())
+    val libraryViewMode: StateFlow<LibraryViewMode> = _libraryViewMode.asStateFlow()
+
+    fun getLibraryViewMode(): LibraryViewMode {
+        val raw = prefs.getString("library_view_mode", LibraryViewMode.GRID.name)
+        return try {
+            LibraryViewMode.valueOf(raw ?: LibraryViewMode.GRID.name)
+        } catch (e: Exception) {
+            LibraryViewMode.GRID
+        }
+    }
+
+    fun setLibraryViewMode(mode: LibraryViewMode) {
+        prefs.edit().putString("library_view_mode", mode.name).apply()
+        _libraryViewMode.value = mode
+    }
 
     private fun loadSettings(): AppSettings {
         val rawOwner = prefs.getString("github_owner", "shahriar-ahmed-seam") ?: "shahriar-ahmed-seam"

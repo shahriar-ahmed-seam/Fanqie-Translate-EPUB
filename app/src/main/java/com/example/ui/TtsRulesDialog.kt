@@ -1,11 +1,17 @@
 package com.example.ui
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
@@ -15,9 +21,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -25,7 +37,6 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.tts.rule.RuleValidationResult
 import com.example.tts.rule.TtsRule
 import com.example.tts.rule.TtsRuleType
-import com.example.tts.rule.TtsTextProcessor
 
 /**
  * Reusable Settings Card section for managing TTS Speech Rules in SettingsScreen style.
@@ -38,13 +49,14 @@ fun TtsRulesSection(
     onDeleteRule: (String) -> Unit,
     onToggleRule: (String) -> Unit,
     onReorderRule: (String, Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isEmbeddedInDialog: Boolean = false
 ) {
     var selectedFilterIndex by rememberSaveable { mutableIntStateOf(0) }
     var editingRule by remember { mutableStateOf<TtsRule?>(null) }
     var isCreatingNewRule by remember { mutableStateOf(false) }
 
-    val filterOptions = listOf("All", "Skip", "Regex Skip", "Pronunciation")
+    val filterOptions = listOf("All", "Skip", "Regex", "Replace")
 
     val filteredRules = remember(rules, selectedFilterIndex) {
         when (selectedFilterIndex) {
@@ -55,66 +67,86 @@ fun TtsRulesSection(
         }
     }
 
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
+    val content = @Composable {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
+                .padding(if (isEmbeddedInDialog) 0.dp else 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            if (isEmbeddedInDialog) {
+                // Compact header inside reader dialog to avoid duplicate title
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Spellcheck,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp)
+                    Text(
+                        text = "${rules.size} rule${if (rules.size != 1) "s" else ""} configured",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            text = "TTS Speech Rules",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Customize pronunciation and omit words or regex patterns from speech",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    FilledTonalButton(
+                        onClick = { isCreatingNewRule = true },
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("tts_section_add_rule_button")
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Add Rule", style = MaterialTheme.typography.labelMedium)
                     }
                 }
-
-                FilledTonalButton(
-                    onClick = { isCreatingNewRule = true },
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier.testTag("tts_section_add_rule_button")
+            } else {
+                // Full header in SettingsScreen
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Add Rule", style = MaterialTheme.typography.labelMedium)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Spellcheck,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Speech Rules",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "${rules.size} rule${if (rules.size != 1) "s" else ""} configured",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    FilledTonalButton(
+                        onClick = { isCreatingNewRule = true },
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("tts_section_add_rule_button")
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Add Rule", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Filter Chips: All, Skip, Regex Skip, Pronunciation
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            // Horizontally Scrollable Filter Chips
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                filterOptions.forEachIndexed { index, title ->
+                itemsIndexed(filterOptions) { index, title ->
                     val count = when (index) {
                         1 -> rules.count { it.ruleType == TtsRuleType.SKIP }
                         2 -> rules.count { it.ruleType == TtsRuleType.SKIP_REGEX }
@@ -124,14 +156,16 @@ fun TtsRulesSection(
                     FilterChip(
                         selected = selectedFilterIndex == index,
                         onClick = { selectedFilterIndex = index },
-                        label = { Text("$title ($count)", style = MaterialTheme.typography.labelSmall) }
+                        label = { Text("$title ($count)", style = MaterialTheme.typography.labelMedium) },
+                        leadingIcon = if (selectedFilterIndex == index) {
+                            { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                        } else null,
+                        modifier = Modifier.testTag("tts_filter_chip_${title.lowercase()}")
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Rules List
+            // Rules List or Empty State
             if (filteredRules.isEmpty()) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -143,7 +177,7 @@ fun TtsRulesSection(
                             .fillMaxWidth()
                             .padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.RecordVoiceOver,
@@ -152,15 +186,38 @@ fun TtsRulesSection(
                             modifier = Modifier.size(36.dp)
                         )
                         Text(
-                            text = if (rules.isEmpty()) "No custom speech rules configured yet." else "No rules match this filter.",
+                            text = if (rules.isEmpty()) "No speech rules yet" else "No ${filterOptions[selectedFilterIndex]} rules found",
                             style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = "Skip rules remove unwanted text; Pronunciation rules replace text before speaking.",
+                            text = if (rules.isEmpty())
+                                "Create rules to skip patterns or adjust pronunciation during TTS playback."
+                            else
+                                "Change or clear the category filter to view other rules.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline
                         )
+                        if (rules.isEmpty()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            OutlinedButton(
+                                onClick = { isCreatingNewRule = true },
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Add Speech Rule")
+                            }
+                        } else if (selectedFilterIndex != 0) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            TextButton(
+                                onClick = { selectedFilterIndex = 0 },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                            ) {
+                                Text("Show All Rules")
+                            }
+                        }
                     }
                 }
             } else {
@@ -183,6 +240,18 @@ fun TtsRulesSection(
                     }
                 }
             }
+        }
+    }
+
+    if (isEmbeddedInDialog) {
+        content()
+    } else {
+        Card(
+            modifier = modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            content()
         }
     }
 
@@ -230,52 +299,78 @@ fun TtsRulesDialog(
     onToggleRule: (String) -> Unit,
     onReorderRule: ((String, Boolean) -> Unit)? = null
 ) {
+    val configuration = LocalConfiguration.current
+    val maxDialogHeight = (configuration.screenHeightDp * 0.90f).dp
+
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
-        Surface(
+        Box(
             modifier = Modifier
-                .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.85f),
-            shape = RoundedCornerShape(24.dp),
-            tonalElevation = 6.dp,
-            shadowElevation = 12.dp
+                .fillMaxSize()
+                .systemBarsPadding()
+                .imePadding()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onDismiss() }
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Column(
+            Surface(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
+                    .widthIn(min = 280.dp, max = 640.dp)
+                    .fillMaxWidth()
+                    .heightIn(max = maxDialogHeight)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { /* consume touches */ },
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+                shadowElevation = 12.dp
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Manage Speech Rules",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    // Header
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 24.dp, end = 16.dp, top = 18.dp, bottom = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Speech Rules",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.Default.Close, contentDescription = "Close")
+                        }
                     }
-                }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                ) {
-                    item {
+                    // Scrollable Rules Section
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
                         TtsRulesSection(
                             rules = rules,
                             onSaveRule = onSaveRule,
                             onDeleteRule = onDeleteRule,
                             onToggleRule = onToggleRule,
-                            onReorderRule = { id, up -> onReorderRule?.invoke(id, up) }
+                            onReorderRule = { id, up -> onReorderRule?.invoke(id, up) },
+                            isEmbeddedInDialog = true
                         )
                     }
                 }
@@ -285,7 +380,12 @@ fun TtsRulesDialog(
 }
 
 /**
- * Individual Rule Card clearly distinguishing Skip, Regex Skip, and Pronunciation.
+ * Individual Rule Card clearly distinguishing Skip, Regex, and Replace rules.
+ * Structured with:
+ * 1. Top row: Type badge + mode chips on left, Switch on right.
+ * 2. Middle row: Full-width text body with multi-line wrapping (handles very long words/regex gracefully).
+ * 3. Bottom row: Reorder arrows on left, Edit & Delete actions on right.
+ * Entire card is clickable to Edit.
  */
 @Composable
 private fun TtsRuleItemCard(
@@ -300,213 +400,274 @@ private fun TtsRuleItemCard(
     onMoveDown: () -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("tts_rule_card_${rule.id}"),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (rule.isEnabled)
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
             else
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.18f)
         )
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Reorder Up/Down arrows
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-                modifier = Modifier.padding(end = 4.dp)
+            // 1. Top Row: Type badge + mode tags on Left, Enable Switch on Right
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = onMoveUp,
-                    enabled = canMoveUp,
-                    modifier = Modifier.size(26.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowUpward,
-                        contentDescription = "Move up",
-                        modifier = Modifier.size(16.dp),
-                        tint = if (canMoveUp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-                    )
-                }
-                IconButton(
-                    onClick = onMoveDown,
-                    enabled = canMoveDown,
-                    modifier = Modifier.size(26.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowDownward,
-                        contentDescription = "Move down",
-                        modifier = Modifier.size(16.dp),
-                        tint = if (canMoveDown) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-                    )
-                }
-            }
-
-            // Rule Details
-            Column(modifier = Modifier.weight(1f)) {
+                // Badges & mode pills
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f, fill = false)
                 ) {
-                    // Type Badge: clearly distinguishing Skip, Regex Skip, Pronunciation
                     when (rule.ruleType) {
                         TtsRuleType.SKIP -> {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(MaterialTheme.colorScheme.errorContainer)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = if (rule.isEnabled) 0.9f else 0.4f)
                             ) {
                                 Text(
                                     text = "SKIP",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                                 )
                             }
                         }
                         TtsRuleType.SKIP_REGEX -> {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(MaterialTheme.colorScheme.tertiaryContainer)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = if (rule.isEnabled) 0.9f else 0.4f)
                             ) {
                                 Text(
-                                    text = "REGEX SKIP",
+                                    text = "REGEX",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                                 )
                             }
                         }
                         TtsRuleType.REPLACE -> {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(MaterialTheme.colorScheme.primaryContainer)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (rule.isEnabled) 0.9f else 0.4f)
                             ) {
                                 Text(
-                                    text = "PRONUNCIATION",
+                                    text = "REPLACE",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                                 )
                             }
                         }
                     }
 
-                    // Matching mode / case tags
                     if (rule.ruleType != TtsRuleType.SKIP_REGEX && rule.wholeWord) {
-                        Text(
-                            text = "Whole word",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Text(
+                                text = "Word",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
+
                     if (rule.caseSensitive) {
-                        Text(
-                            text = "Case-sensitive",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Rule Content Representation
-                when (rule.ruleType) {
-                    TtsRuleType.SKIP -> {
-                        Text(
-                            text = "\"${rule.pattern}\"",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    TtsRuleType.SKIP_REGEX -> {
-                        Text(
-                            text = rule.pattern,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.tertiary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    TtsRuleType.REPLACE -> {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
                             Text(
-                                text = "\"${rule.pattern}\"",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                                contentDescription = "replaces with",
-                                modifier = Modifier.size(14.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "\"${rule.replacement}\"",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                text = "Aa",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
                     }
                 }
-            }
 
-            // Controls: Edit, Delete, Enable/Disable Switch
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        imageVector = Icons.Default.Edit,
-                        contentDescription = "Edit rule",
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-                IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "Delete rule",
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(2.dp))
+                // Switch
                 Switch(
                     checked = rule.isEnabled,
                     onCheckedChange = { onToggle() },
-                    modifier = Modifier.height(28.dp)
+                    modifier = Modifier
+                        .scale(0.82f)
+                        .testTag("tts_rule_switch_${rule.id}")
                 )
+            }
+
+            // 2. Full-width Body: Content with high visual contrast and multi-line wrapping
+            when (rule.ruleType) {
+                TtsRuleType.SKIP -> {
+                    Text(
+                        text = "\"${rule.pattern}\"",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (rule.isEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
+                }
+                TtsRuleType.SKIP_REGEX -> {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = rule.pattern,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontFamily = FontFamily.Monospace,
+                            color = if (rule.isEnabled) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f),
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+                TtsRuleType.REPLACE -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "\"${rule.pattern}\"",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (rule.isEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            modifier = Modifier.weight(1f),
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = "replaces with",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = if (rule.isEnabled) 1f else 0.5f)
+                        )
+                        Text(
+                            text = "\"${rule.replacement}\"",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (rule.isEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                            modifier = Modifier.weight(1f),
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            // 3. Bottom Action Row: Reorder on Left, Edit & Delete on Right
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Reorder controls
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    IconButton(
+                        onClick = onMoveUp,
+                        enabled = canMoveUp,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("tts_rule_move_up_${rule.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowUpward,
+                            contentDescription = "Move up",
+                            modifier = Modifier.size(20.dp),
+                            tint = if (canMoveUp) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onMoveDown,
+                        enabled = canMoveDown,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("tts_rule_move_down_${rule.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowDownward,
+                            contentDescription = "Move down",
+                            modifier = Modifier.size(20.dp),
+                            tint = if (canMoveDown) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                        )
+                    }
+                }
+
+                // Edit & Delete actions
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("tts_rule_edit_button_${rule.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Edit rule",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("tts_rule_delete_button_${rule.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "Delete rule",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             }
         }
     }
 }
 
 /**
- * Sub-dialog for Adding or Editing a rule with live regex validation and test sandbox.
+ * Responsive, simplified Dialog for Adding or Editing a speech rule.
+ * - Sticky Header with title and close button.
+ * - Scrollable middle body with only necessary controls (rule type, inputs, toggles).
+ * - Sticky Footer with Cancel and Save buttons (always visible and reachable above keyboard).
+ * - Fully responsive with WindowInsets and IME padding for split-screen, landscape, and small phones.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -523,14 +684,6 @@ private fun TtsEditRuleDialog(
     var caseSensitive by rememberSaveable { mutableStateOf(initialRule.caseSensitive) }
     var isEnabled by rememberSaveable { mutableStateOf(initialRule.isEnabled) }
 
-    // Test Sandbox Sample Text
-    var testSample by rememberSaveable {
-        mutableStateOf(
-            if (pattern.isNotBlank()) "Sample text containing $pattern in a sentence."
-            else "Tom ate a Tomato while [reading chapter 1]."
-        )
-    }
-
     // Validation
     val validation = remember(pattern, ruleType) {
         val draft = initialRule.copy(
@@ -542,224 +695,340 @@ private fun TtsEditRuleDialog(
         draft.validate()
     }
 
-    // Live Test Output
-    val testOutput = remember(testSample, ruleType, pattern, replacement, wholeWord, caseSensitive, isEnabled) {
-        if (testSample.isBlank() || pattern.isBlank() || validation !is RuleValidationResult.Valid) {
-            testSample
-        } else {
-            val previewRule = initialRule.copy(
-                ruleType = ruleType,
-                pattern = pattern,
-                replacement = replacement,
-                isRegex = ruleType == TtsRuleType.SKIP_REGEX,
-                wholeWord = if (ruleType == TtsRuleType.SKIP_REGEX) false else wholeWord,
-                caseSensitive = caseSensitive,
-                isEnabled = isEnabled
-            )
-            TtsTextProcessor.test(testSample, listOf(previewRule))
-        }
-    }
+    val configuration = LocalConfiguration.current
+    val screenHeightDp = configuration.screenHeightDp
+    val isCompactHeight = screenHeightDp < 500
+    val maxDialogHeight = (screenHeightDp * 0.90f).dp
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text(if (isNew) "Add Speech Rule" else "Edit Speech Rule")
-        },
-        text = {
-            Column(
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .systemBarsPadding()
+                .imePadding()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { onDismiss() }
+                .padding(
+                    horizontal = 16.dp,
+                    vertical = if (isCompactHeight) 8.dp else 16.dp
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
                 modifier = Modifier
+                    .widthIn(min = 280.dp, max = 540.dp)
                     .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .heightIn(max = maxDialogHeight)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { /* prevent dismissal when tapping card */ },
+                shape = RoundedCornerShape(if (isCompactHeight) 20.dp else 24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+                shadowElevation = 12.dp
             ) {
-                // 3-way Rule Type Selector: Skip, Regex Skip, Pronunciation
-                Text(
-                    text = "Rule Type",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                Column(
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    FilterChip(
-                        selected = ruleType == TtsRuleType.SKIP,
-                        onClick = { ruleType = TtsRuleType.SKIP },
-                        label = { Text("Skip", style = MaterialTheme.typography.labelSmall) },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = ruleType == TtsRuleType.SKIP_REGEX,
-                        onClick = { ruleType = TtsRuleType.SKIP_REGEX },
-                        label = { Text("Regex Skip", style = MaterialTheme.typography.labelSmall) },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = ruleType == TtsRuleType.REPLACE,
-                        onClick = { ruleType = TtsRuleType.REPLACE },
-                        label = { Text("Pronunciation", style = MaterialTheme.typography.labelSmall) },
-                        modifier = Modifier.weight(1.2f)
-                    )
-                }
-
-                // Type-specific pattern input
-                when (ruleType) {
-                    TtsRuleType.SKIP -> {
-                        OutlinedTextField(
-                            value = pattern,
-                            onValueChange = { pattern = it },
-                            label = { Text("Word or Phrase to Skip") },
-                            placeholder = { Text("e.g. Tomato") },
-                            isError = validation is RuleValidationResult.Invalid && pattern.isNotBlank(),
-                            supportingText = { Text("Matched text will be omitted from TTS speech.") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
+                    // 1. Sticky Header
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                start = if (isCompactHeight) 20.dp else 24.dp,
+                                end = if (isCompactHeight) 12.dp else 16.dp,
+                                top = if (isCompactHeight) 12.dp else 18.dp,
+                                bottom = if (isCompactHeight) 8.dp else 12.dp
+                            ),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isNew) "Add Speech Rule" else "Edit Speech Rule",
+                            style = if (isCompactHeight) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                    }
-                    TtsRuleType.SKIP_REGEX -> {
-                        OutlinedTextField(
-                            value = pattern,
-                            onValueChange = { pattern = it },
-                            label = { Text("Regular Expression Pattern") },
-                            placeholder = { Text("e.g. \\[.*?\\]") },
-                            isError = validation is RuleValidationResult.Invalid && pattern.isNotBlank(),
-                            supportingText = {
-                                if (validation is RuleValidationResult.Invalid && pattern.isNotBlank()) {
-                                    Text(
-                                        text = (validation as RuleValidationResult.Invalid).reason,
-                                        color = MaterialTheme.colorScheme.error
-                                    )
-                                } else {
-                                    Text("Text matching this regex will be omitted from TTS speech.")
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                    }
-                    TtsRuleType.REPLACE -> {
-                        OutlinedTextField(
-                            value = pattern,
-                            onValueChange = { pattern = it },
-                            label = { Text("Original Text in Novel") },
-                            placeholder = { Text("e.g. Tom") },
-                            supportingText = { Text("Text appearing in the reader.") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-
-                        OutlinedTextField(
-                            value = replacement,
-                            onValueChange = { replacement = it },
-                            label = { Text("Spoken Replacement") },
-                            placeholder = { Text("e.g. Jack") },
-                            supportingText = { Text("What Android TTS will speak instead.") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                    }
-                }
-
-                // Matching Mode Options
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (ruleType != TtsRuleType.SKIP_REGEX) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.size(36.dp)
                         ) {
-                            Text("Whole Word Only", style = MaterialTheme.typography.bodyMedium)
-                            Switch(checked = wholeWord, onCheckedChange = { wholeWord = it })
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    // 2. Scrollable Body: Form Controls only (no test preview or tutorial clutter)
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                            .padding(
+                                horizontal = if (isCompactHeight) 20.dp else 24.dp,
+                                vertical = if (isCompactHeight) 12.dp else 16.dp
+                            ),
+                        verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 12.dp else 16.dp)
                     ) {
-                        Text("Case Sensitive", style = MaterialTheme.typography.bodyMedium)
-                        Switch(checked = caseSensitive, onCheckedChange = { caseSensitive = it })
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Enabled", style = MaterialTheme.typography.bodyMedium)
-                        Switch(checked = isEnabled, onCheckedChange = { isEnabled = it })
-                    }
-                }
-
-                HorizontalDivider()
-
-                // Interactive Test Sandbox
-                Text(
-                    text = "Live Test Preview",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                OutlinedTextField(
-                    value = testSample,
-                    onValueChange = { testSample = it },
-                    label = { Text("Test Input") },
-                    modifier = Modifier.fillMaxWidth(),
-                    maxLines = 2,
-                    textStyle = MaterialTheme.typography.bodySmall
-                )
-
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(8.dp)) {
-                        Text(
-                            text = "TTS will speak:",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = testOutput.ifBlank { "(empty - paragraph skipped)" },
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (testOutput.isBlank()) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    if (validation is RuleValidationResult.Valid) {
-                        onSave(
-                            initialRule.copy(
-                                ruleType = ruleType,
-                                pattern = pattern.trim(),
-                                replacement = if (ruleType == TtsRuleType.REPLACE) replacement.trim() else "",
-                                isRegex = ruleType == TtsRuleType.SKIP_REGEX,
-                                wholeWord = if (ruleType == TtsRuleType.SKIP_REGEX) false else wholeWord,
-                                caseSensitive = caseSensitive,
-                                isEnabled = isEnabled
+                        // Rule Type Selector (Skip, Regex Skip, Pronunciation)
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "Rule Type",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = ruleType == TtsRuleType.SKIP,
+                                    onClick = { ruleType = TtsRuleType.SKIP },
+                                    label = { Text("Skip", maxLines = 1) },
+                                    leadingIcon = if (ruleType == TtsRuleType.SKIP) {
+                                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                    } else null,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("tts_chip_type_skip")
+                                )
+                                FilterChip(
+                                    selected = ruleType == TtsRuleType.SKIP_REGEX,
+                                    onClick = { ruleType = TtsRuleType.SKIP_REGEX },
+                                    label = { Text("Regex", maxLines = 1) },
+                                    leadingIcon = if (ruleType == TtsRuleType.SKIP_REGEX) {
+                                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                    } else null,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("tts_chip_type_regex")
+                                )
+                                FilterChip(
+                                    selected = ruleType == TtsRuleType.REPLACE,
+                                    onClick = { ruleType = TtsRuleType.REPLACE },
+                                    label = { Text("Replace", maxLines = 1) },
+                                    leadingIcon = if (ruleType == TtsRuleType.REPLACE) {
+                                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                    } else null,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("tts_chip_type_replace")
+                                )
+                            }
+                        }
+
+                        // Type-specific input fields
+                        when (ruleType) {
+                            TtsRuleType.SKIP -> {
+                                OutlinedTextField(
+                                    value = pattern,
+                                    onValueChange = { pattern = it },
+                                    label = { Text("Word or Phrase to Skip") },
+                                    placeholder = { Text("e.g. Tomato") },
+                                    isError = validation is RuleValidationResult.Invalid && pattern.isNotBlank(),
+                                    supportingText = if (validation is RuleValidationResult.Invalid && pattern.isNotBlank()) {
+                                        { Text((validation as RuleValidationResult.Invalid).reason, color = MaterialTheme.colorScheme.error) }
+                                    } else null,
+                                    keyboardOptions = KeyboardOptions(
+                                        capitalization = KeyboardCapitalization.None,
+                                        imeAction = ImeAction.Done
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("tts_field_pattern"),
+                                    maxLines = 3
+                                )
+                            }
+                            TtsRuleType.SKIP_REGEX -> {
+                                OutlinedTextField(
+                                    value = pattern,
+                                    onValueChange = { pattern = it },
+                                    label = { Text("Regular Expression") },
+                                    placeholder = { Text("e.g. \\[.*?\\]") },
+                                    isError = validation is RuleValidationResult.Invalid && pattern.isNotBlank(),
+                                    supportingText = if (validation is RuleValidationResult.Invalid && pattern.isNotBlank()) {
+                                        { Text((validation as RuleValidationResult.Invalid).reason, color = MaterialTheme.colorScheme.error) }
+                                    } else null,
+                                    keyboardOptions = KeyboardOptions(
+                                        autoCorrectEnabled = false,
+                                        keyboardType = KeyboardType.Ascii,
+                                        imeAction = ImeAction.Done
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("tts_field_pattern"),
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                                    maxLines = 3
+                                )
+                            }
+                            TtsRuleType.REPLACE -> {
+                                OutlinedTextField(
+                                    value = pattern,
+                                    onValueChange = { pattern = it },
+                                    label = { Text("Original Text") },
+                                    placeholder = { Text("e.g. Tom") },
+                                    isError = validation is RuleValidationResult.Invalid && pattern.isNotBlank(),
+                                    supportingText = if (validation is RuleValidationResult.Invalid && pattern.isNotBlank()) {
+                                        { Text((validation as RuleValidationResult.Invalid).reason, color = MaterialTheme.colorScheme.error) }
+                                    } else null,
+                                    keyboardOptions = KeyboardOptions(
+                                        capitalization = KeyboardCapitalization.None,
+                                        imeAction = ImeAction.Next
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("tts_field_pattern"),
+                                    maxLines = 3
+                                )
+
+                                OutlinedTextField(
+                                    value = replacement,
+                                    onValueChange = { replacement = it },
+                                    label = { Text("Spoken Replacement") },
+                                    placeholder = { Text("e.g. Jack") },
+                                    keyboardOptions = KeyboardOptions(
+                                        capitalization = KeyboardCapitalization.None,
+                                        imeAction = ImeAction.Done
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("tts_field_replacement"),
+                                    maxLines = 3
+                                )
+                            }
+                        }
+
+                        // Matching Mode Toggles
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (ruleType != TtsRuleType.SKIP_REGEX) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .toggleable(
+                                            value = wholeWord,
+                                            onValueChange = { wholeWord = it },
+                                            role = Role.Switch
+                                        )
+                                        .padding(vertical = 8.dp, horizontal = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Whole Word Only", style = MaterialTheme.typography.bodyMedium)
+                                    Switch(
+                                        checked = wholeWord,
+                                        onCheckedChange = null,
+                                        modifier = Modifier.testTag("tts_toggle_whole_word")
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .toggleable(
+                                        value = caseSensitive,
+                                        onValueChange = { caseSensitive = it },
+                                        role = Role.Switch
+                                    )
+                                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Case Sensitive", style = MaterialTheme.typography.bodyMedium)
+                                Switch(
+                                    checked = caseSensitive,
+                                    onCheckedChange = null,
+                                    modifier = Modifier.testTag("tts_toggle_case_sensitive")
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .toggleable(
+                                        value = isEnabled,
+                                        onValueChange = { isEnabled = it },
+                                        role = Role.Switch
+                                    )
+                                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Enabled", style = MaterialTheme.typography.bodyMedium)
+                                Switch(
+                                    checked = isEnabled,
+                                    onCheckedChange = null,
+                                    modifier = Modifier.testTag("tts_toggle_enabled")
+                                )
+                            }
+                        }
                     }
-                },
-                enabled = pattern.isNotBlank() && validation is RuleValidationResult.Valid
-            ) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    // 3. Sticky Footer: Cancel and Save (Always visible and reachable above keyboard)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                horizontal = if (isCompactHeight) 20.dp else 24.dp,
+                                vertical = if (isCompactHeight) 10.dp else 14.dp
+                            ),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.testTag("tts_edit_dialog_cancel")
+                        ) {
+                            Text("Cancel")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                if (validation is RuleValidationResult.Valid) {
+                                    onSave(
+                                        initialRule.copy(
+                                            ruleType = ruleType,
+                                            pattern = pattern.trim(),
+                                            replacement = if (ruleType == TtsRuleType.REPLACE) replacement.trim() else "",
+                                            isRegex = ruleType == TtsRuleType.SKIP_REGEX,
+                                            wholeWord = if (ruleType == TtsRuleType.SKIP_REGEX) false else wholeWord,
+                                            caseSensitive = caseSensitive,
+                                            isEnabled = isEnabled
+                                        )
+                                    )
+                                }
+                            },
+                            enabled = pattern.isNotBlank() && validation is RuleValidationResult.Valid,
+                            modifier = Modifier.testTag("tts_edit_dialog_save")
+                        ) {
+                            Text("Save")
+                        }
+                    }
+                }
             }
         }
-    )
+    }
 }

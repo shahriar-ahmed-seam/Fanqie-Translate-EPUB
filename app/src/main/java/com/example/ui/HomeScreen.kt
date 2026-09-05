@@ -290,144 +290,151 @@ fun BookJobCard(
     val isLocalBook = book.isLocalBook || job == null
 
     Card(
-        onClick = onCardClick,
         modifier = Modifier
             .fillMaxWidth()
             .testTag("book_item_${book.id}"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                // Cover thumbnail
-                if (book.coverPath != null && File(book.coverPath).exists()) {
-                    AsyncImage(
-                        model = File(book.coverPath),
-                        contentDescription = "Cover",
-                        modifier = Modifier
-                            .width(60.dp)
-                            .height(84.dp)
-                            .clip(RoundedCornerShape(8.dp)),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .width(60.dp)
-                            .height(84.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.primaryContainer),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Book,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(32.dp)
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Main clickable content area
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onCardClick)
+                    .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp)
+            ) {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    // Cover thumbnail
+                    if (book.coverPath != null && File(book.coverPath).exists()) {
+                        AsyncImage(
+                            model = File(book.coverPath),
+                            contentDescription = "Cover",
+                            modifier = Modifier
+                                .width(60.dp)
+                                .height(84.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Crop
                         )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .width(60.dp)
+                                .height(84.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Book,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
                     }
-                }
 
-                Spacer(modifier = Modifier.width(14.dp))
+                    Spacer(modifier = Modifier.width(14.dp))
 
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = item.displayTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = book.author,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = if (isLocalBook) "${book.chapterCount} chapters" else "${book.chapterCount} ch • ${book.totalChunks} chunks",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
+                            text = item.displayTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.weight(1f))
-                        StatusBadge(status = if (isLocalBook) "LIBRARY" else (job?.status ?: "QUEUED"))
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = book.author,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (isLocalBook) "${book.chapterCount} chapters" else "${book.chapterCount} ch • ${book.totalChunks} chunks",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            StatusBadge(status = if (isLocalBook) "LIBRARY" else (job?.status ?: "QUEUED"))
+                        }
                     }
                 }
-            }
 
-            // Progress bar
-            if (job != null) {
-                Spacer(modifier = Modifier.height(12.dp))
-                LinearProgressIndicator(
-                    progress = { job.progress },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "${job.completedChunks} / ${job.totalChunks}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                // Progress bar
+                if (job != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    LinearProgressIndicator(
+                        progress = { job.progress },
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (jobActiveWorkers > 0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${job.completedChunks} / ${job.totalChunks}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (jobActiveWorkers > 0) {
+                                Text(
+                                    text = "$jobActiveWorkers active",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
                             Text(
-                                text = "$jobActiveWorkers active",
+                                text = "${(job.progress * 100).toInt()}%",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.Bold
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
                         }
+                    }
+
+                    if (job.failedChunks > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "${(job.progress * 100).toInt()}%",
+                            text = "Translation incomplete: ${job.failedChunks} chunks failed",
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    if (job.errorMessage != null && job.failedChunks == 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = job.errorMessage,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
-
-                if (job.failedChunks > 0) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Translation incomplete: ${job.failedChunks} chunks failed",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                if (job.errorMessage != null && job.failedChunks == 0) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = job.errorMessage,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Action Buttons
+            // Action Buttons Row (separate, non-overlapping touch target)
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (onManageGroups != null) {
                     IconButton(
                         onClick = onManageGroups,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Label,
@@ -442,7 +449,7 @@ fun BookJobCard(
 
                 IconButton(
                     onClick = { onDelete(book.id) },
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(40.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.DeleteOutline,

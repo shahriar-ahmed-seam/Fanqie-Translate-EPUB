@@ -16,6 +16,7 @@ import com.example.data.db.LibraryGroupEntity
 import com.example.data.db.BookGroupCrossRefEntity
 import com.example.data.db.ChapterBookmarkEntity
 import com.example.data.repository.AppSettings
+import com.example.data.repository.LibraryViewMode
 import com.example.data.repository.SettingsRepository
 import com.example.data.db.toEntity
 import com.example.data.db.toModel
@@ -63,6 +64,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val updateManager = AppUpdateManager(application)
 
     val settings: StateFlow<AppSettings> = settingsRepository.settings
+    val libraryViewMode: StateFlow<LibraryViewMode> = settingsRepository.libraryViewMode
+
+    fun setLibraryViewMode(mode: LibraryViewMode) {
+        settingsRepository.setLibraryViewMode(mode)
+    }
 
     val allBooksWithJobs: StateFlow<List<BookWithJob>> = combine(
         database.bookDao().getAllBooks(),
