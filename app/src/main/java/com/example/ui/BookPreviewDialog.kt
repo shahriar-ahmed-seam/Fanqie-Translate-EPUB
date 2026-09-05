@@ -134,7 +134,7 @@ fun BookPreviewDialog(
                 // Actions
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(
@@ -143,42 +143,15 @@ fun BookPreviewDialog(
                     ) {
                         Text("Cancel")
                     }
-                    Spacer(modifier = Modifier.weight(1f))
-                    if (onAddToLibrary != null) {
-                        if (previewState.isLibraryIntent) {
-                            OutlinedButton(
-                                onClick = onConfirm,
-                                modifier = Modifier.testTag("preview_queue_button")
-                            ) {
-                                Icon(Icons.Default.Translate, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Translate")
-                            }
-                            Button(
-                                onClick = onAddToLibrary,
-                                modifier = Modifier.testTag("preview_library_button")
-                            ) {
-                                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Add to Library")
-                            }
-                        } else {
-                            OutlinedButton(
-                                onClick = onAddToLibrary,
-                                modifier = Modifier.testTag("preview_library_button")
-                            ) {
-                                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Add to Library")
-                            }
-                            Button(
-                                onClick = onConfirm,
-                                modifier = Modifier.testTag("preview_queue_button")
-                            ) {
-                                Icon(Icons.Default.Translate, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Translate")
-                            }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    if (previewState.isLibraryIntent) {
+                        Button(
+                            onClick = { (onAddToLibrary ?: onConfirm)() },
+                            modifier = Modifier.testTag("preview_library_button")
+                        ) {
+                            Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Add to Library")
                         }
                     } else {
                         Button(
@@ -187,7 +160,7 @@ fun BookPreviewDialog(
                         ) {
                             Icon(Icons.Default.Translate, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Add to Queue")
+                            Text("Translate")
                         }
                     }
                 }

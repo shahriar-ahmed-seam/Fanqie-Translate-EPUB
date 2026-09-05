@@ -28,28 +28,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import com.example.data.db.BookGroupCrossRefEntity
 import com.example.data.db.BookType
-import com.example.data.db.LibraryGroupEntity
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     booksWithJobs: List<BookWithJob>,
-    libraryGroups: List<LibraryGroupEntity> = emptyList(),
-    bookGroupCrossRefs: List<BookGroupCrossRefEntity> = emptyList(),
     activeWorkers: Int,
     activeWorkersByJob: Map<String, Int> = emptyMap(),
     exportingBookIds: Set<String> = emptySet(),
     isProcessing: Boolean,
     onSelectSingleEpub: (Uri) -> Unit,
     onSelectMultipleEpubs: (List<Uri>) -> Unit,
-    onAddToLibrary: (Uri) -> Unit = {},
-    onCreateGroup: (String) -> Unit = {},
-    onRenameGroup: (String, String) -> Unit = { _, _ -> },
-    onDeleteGroup: (String) -> Unit = {},
-    onSetBookGroups: (bookId: String, selectedGroupIds: Set<String>) -> Unit = { _, _ -> },
     onNavigateToQueue: () -> Unit,
     onOpenNovelDetail: (String) -> Unit = {},
     onExportEpub: (bookId: String, bookTitle: String, exportedFilePath: String?) -> Unit,
@@ -65,13 +56,6 @@ fun HomeScreen(
         uri?.let { onSelectSingleEpub(it) }
     }
 
-    // Library EPUB Picker (triggers preview with library intent)
-    val libraryPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let { onAddToLibrary(it) }
-    }
-
     // Multiple EPUBs Picker
     val multiplePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
@@ -81,27 +65,8 @@ fun HomeScreen(
         }
     }
 
-    var selectedGroupId by rememberSaveable { mutableStateOf<String?>("ALL") }
-    var showCreateGroupDialog by remember { mutableStateOf(false) }
-    var groupToRename by remember { mutableStateOf<LibraryGroupEntity?>(null) }
-    var groupToDelete by remember { mutableStateOf<LibraryGroupEntity?>(null) }
-    var bookToManageGroups by remember { mutableStateOf<BookWithJob?>(null) }
-
-    val activeGroup = libraryGroups.firstOrNull { it.id == selectedGroupId }
-    val filteredBooks = remember(booksWithJobs, selectedGroupId, bookGroupCrossRefs) {
-        if (selectedGroupId == null || selectedGroupId == "ALL") {
-            booksWithJobs
-        } else {
-            val matchingBookIds = bookGroupCrossRefs
-                .filter { it.groupId == selectedGroupId }
-                .map { it.bookId }
-                .toSet()
-            booksWithJobs.filter {
-                matchingBookIds.contains(it.book.id) ||
-                (selectedGroupId == "default_translated" && it.book.bookType == BookType.TRANSLATION) ||
-                (selectedGroupId == "default_local" && it.book.bookType == BookType.LOCAL)
-            }
-        }
+    val translationProjects = remember(booksWithJobs) {
+        booksWithJobs.filter { it.book.bookType == BookType.TRANSLATION || it.job != null }
     }
 
     Scaffold(
@@ -163,7 +128,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
-                // Action Header Card
+                // Translation Action Card
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -179,25 +144,24 @@ fun HomeScreen(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = Icons.Default.AutoStories,
+                                imageVector = Icons.Default.Translate,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(24.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Add EPUB Novel",
+                                text = "Translate EPUB Novel",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
                         }
                         Text(
-                            text = "Import a local EPUB to translate chapters with AI, or add directly to your reading library without translation.",
+                            text = "Select a Chinese EPUB novel to translate chapters to English using AI.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
-                        // Dual Action Buttons: Translate vs Library
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -205,7 +169,7 @@ fun HomeScreen(
                             Button(
                                 onClick = { singlePickerLauncher.launch("application/epub+zip") },
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .weight(1.2f)
                                     .testTag("select_single_epub_button"),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                             ) {
@@ -214,155 +178,67 @@ fun HomeScreen(
                                 Text("Translate EPUB", style = MaterialTheme.typography.bodySmall)
                             }
 
-                            FilledTonalButton(
-                                onClick = { libraryPickerLauncher.launch("application/epub+zip") },
+                            OutlinedButton(
+                                onClick = { multiplePickerLauncher.launch("application/epub+zip") },
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("add_to_library_button")
+                                    .weight(0.8f)
+                                    .testTag("select_multiple_epubs_button")
                             ) {
-                                Icon(Icons.Default.Book, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Default.LibraryAdd, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Add to Library", style = MaterialTheme.typography.bodySmall)
+                                Text("Batch", style = MaterialTheme.typography.bodySmall)
                             }
-                        }
-
-                        // Batch Import Secondary Button
-                        OutlinedButton(
-                            onClick = { multiplePickerLauncher.launch("application/epub+zip") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("select_multiple_epubs_button")
-                        ) {
-                            Icon(Icons.Default.LibraryAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Batch Import to Queue", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
             }
 
-            // Library Group Tabs Section
+            // Projects Section Header
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Translation Projects",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (translationProjects.isNotEmpty()) {
                         Text(
-                            text = "Library Groups",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
+                            text = "${translationProjects.size} projects",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        if (filteredBooks.isNotEmpty()) {
-                            Text(
-                                text = "${filteredBooks.size} books",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        item {
-                            FilterChip(
-                                selected = selectedGroupId == "ALL",
-                                onClick = { selectedGroupId = "ALL" },
-                                label = { Text("All (${booksWithJobs.size})") },
-                                leadingIcon = if (selectedGroupId == "ALL") {
-                                    { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                                } else null
-                            )
-                        }
-
-                        items(libraryGroups, key = { it.id }) { group ->
-                            val count = remember(booksWithJobs, group.id, bookGroupCrossRefs) {
-                                val matchingIds = bookGroupCrossRefs.filter { it.groupId == group.id }.map { it.bookId }.toSet()
-                                booksWithJobs.count {
-                                    matchingIds.contains(it.book.id) ||
-                                    (group.id == "default_translated" && it.book.bookType == BookType.TRANSLATION) ||
-                                    (group.id == "default_local" && it.book.bookType == BookType.LOCAL)
-                                }
-                            }
-                            FilterChip(
-                                selected = selectedGroupId == group.id,
-                                onClick = { selectedGroupId = group.id },
-                                label = { Text("${group.name} ($count)") },
-                                leadingIcon = if (selectedGroupId == group.id) {
-                                    { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                                } else null
-                            )
-                        }
-
-                        item {
-                            AssistChip(
-                                onClick = { showCreateGroupDialog = true },
-                                label = { Text("New Group") },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Add, contentDescription = "Add Group", modifier = Modifier.size(16.dp))
-                                }
-                            )
-                        }
-                    }
-
-                    // Options row if a custom group is selected
-                    if (activeGroup != null && !activeGroup.isSystemGroup) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            TextButton(
-                                onClick = { groupToRename = activeGroup },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Rename Group", style = MaterialTheme.typography.labelMedium)
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            TextButton(
-                                onClick = { groupToDelete = activeGroup },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                            ) {
-                                Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Delete Group", style = MaterialTheme.typography.labelMedium)
-                            }
-                        }
                     }
                 }
             }
 
-            if (filteredBooks.isEmpty()) {
+            if (translationProjects.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 40.dp),
+                            .padding(vertical = 48.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(
-                                imageVector = Icons.AutoMirrored.Filled.MenuBook,
+                                imageVector = Icons.Default.Translate,
                                 contentDescription = null,
                                 modifier = Modifier.size(64.dp),
                                 tint = MaterialTheme.colorScheme.outline
                             )
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = if (selectedGroupId == "ALL") "No EPUB novels added yet" else "No books in '${activeGroup?.name ?: "this group"}'",
+                                text = "No translation projects yet",
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = if (selectedGroupId == "ALL") "Tap 'Select EPUB' above to get started" else "Tap the group tag on any book to add it here",
+                                text = "Tap 'Translate EPUB' above to get started",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline
                             )
@@ -370,7 +246,7 @@ fun HomeScreen(
                     }
                 }
             } else {
-                items(filteredBooks, key = { it.book.id }) { item ->
+                items(translationProjects, key = { it.book.id }) { item ->
                     val jobWorkers = item.job?.let { activeWorkersByJob[it.id] } ?: 0
                     val isExporting = exportingBookIds.contains(item.book.id)
                     BookJobCard(
@@ -383,7 +259,6 @@ fun HomeScreen(
                         onResume = onResumeJob,
                         onRetry = onRetryJob,
                         onDelete = onDeleteBook,
-                        onManageGroups = { bookToManageGroups = item },
                         onNavigateToQueue = onNavigateToQueue
                     )
                 }
@@ -393,196 +268,6 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.height(24.dp))
             }
         }
-    }
-
-    // 1. Create Group Dialog
-    if (showCreateGroupDialog) {
-        var groupName by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showCreateGroupDialog = false },
-            title = { Text("Create Library Group") },
-            text = {
-                OutlinedTextField(
-                    value = groupName,
-                    onValueChange = { groupName = it },
-                    label = { Text("Group Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (groupName.isNotBlank()) {
-                            onCreateGroup(groupName.trim())
-                            showCreateGroupDialog = false
-                        }
-                    },
-                    enabled = groupName.isNotBlank()
-                ) {
-                    Text("Create")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateGroupDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // 2. Rename Group Dialog
-    if (groupToRename != null) {
-        val target = groupToRename!!
-        var newName by remember { mutableStateOf(target.name) }
-        AlertDialog(
-            onDismissRequest = { groupToRename = null },
-            title = { Text("Rename Group") },
-            text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    label = { Text("Group Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (newName.isNotBlank()) {
-                            onRenameGroup(target.id, newName.trim())
-                            groupToRename = null
-                        }
-                    },
-                    enabled = newName.isNotBlank()
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { groupToRename = null }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // 3. Delete Group Dialog
-    if (groupToDelete != null) {
-        val target = groupToDelete!!
-        AlertDialog(
-            onDismissRequest = { groupToDelete = null },
-            title = { Text("Delete Group") },
-            text = {
-                Text("Delete '${target.name}'? The books in this group will remain in your library.")
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onDeleteGroup(target.id)
-                        groupToDelete = null
-                        if (selectedGroupId == target.id) {
-                            selectedGroupId = "ALL"
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { groupToDelete = null }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // 4. Manage Book Groups Dialog
-    if (bookToManageGroups != null) {
-        val item = bookToManageGroups!!
-        val bookId = item.book.id
-        val initialAssigned = remember(bookId, bookGroupCrossRefs) {
-            val assigned = bookGroupCrossRefs.filter { it.bookId == bookId }.map { it.groupId }.toMutableSet()
-            if (item.book.bookType == BookType.TRANSLATION) assigned.add("default_translated")
-            if (item.book.bookType == BookType.LOCAL) assigned.add("default_local")
-            assigned
-        }
-        var selectedIds by remember { mutableStateOf(initialAssigned.toSet()) }
-
-        AlertDialog(
-            onDismissRequest = { bookToManageGroups = null },
-            title = {
-                Text(
-                    text = "Manage Groups",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = item.displayTitle,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    if (libraryGroups.isEmpty()) {
-                        Text("No custom groups created yet.", style = MaterialTheme.typography.bodySmall)
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 260.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            items(libraryGroups, key = { it.id }) { group ->
-                                val isChecked = selectedIds.contains(group.id)
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            selectedIds = if (isChecked) selectedIds - group.id else selectedIds + group.id
-                                        }
-                                        .padding(vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Checkbox(
-                                        checked = isChecked,
-                                        onCheckedChange = { checked ->
-                                            selectedIds = if (checked) selectedIds + group.id else selectedIds - group.id
-                                        }
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = group.name,
-                                        style = MaterialTheme.typography.bodyMedium
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onSetBookGroups(bookId, selectedIds)
-                        bookToManageGroups = null
-                    }
-                ) {
-                    Text("Done")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { bookToManageGroups = null }) {
-                    Text("Cancel")
-                }
-            }
-        )
     }
 }
 
@@ -597,7 +282,7 @@ fun BookJobCard(
     onResume: (String) -> Unit,
     onRetry: (String) -> Unit,
     onDelete: (String) -> Unit,
-    onManageGroups: () -> Unit = {},
+    onManageGroups: (() -> Unit)? = null,
     onNavigateToQueue: () -> Unit
 ) {
     val book = item.book
@@ -739,19 +424,21 @@ fun BookJobCard(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = onManageGroups,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Label,
-                        contentDescription = "Manage Groups",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                if (onManageGroups != null) {
+                    IconButton(
+                        onClick = onManageGroups,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Label,
+                            contentDescription = "Manage Groups",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
 
-                Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
 
                 IconButton(
                     onClick = { onDelete(book.id) },

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ListAlt
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -33,6 +34,7 @@ import java.io.File
 
 enum class Screen(val title: String) {
     HOME("Home"),
+    LIBRARY("Library"),
     QUEUE("Queue"),
     SETTINGS("Settings")
 }
@@ -217,6 +219,13 @@ fun MainApp(
                         modifier = Modifier.testTag("nav_home")
                     )
                     NavigationBarItem(
+                        selected = currentScreen == Screen.LIBRARY,
+                        onClick = { currentScreen = Screen.LIBRARY },
+                        icon = { Icon(Icons.Default.AutoStories, contentDescription = "Library") },
+                        label = { Text("Library") },
+                        modifier = Modifier.testTag("nav_library")
+                    )
+                    NavigationBarItem(
                         selected = currentScreen == Screen.QUEUE,
                         onClick = { currentScreen = Screen.QUEUE },
                         icon = {
@@ -252,25 +261,32 @@ fun MainApp(
                 when (currentScreen) {
                     Screen.HOME -> HomeScreen(
                         booksWithJobs = booksWithJobs,
-                        libraryGroups = libraryGroups,
-                        bookGroupCrossRefs = bookGroupCrossRefs,
                         activeWorkers = activeWorkers,
                         activeWorkersByJob = activeWorkersByJob,
                         exportingBookIds = exportingBookIds,
                         isProcessing = isProcessing,
                         onSelectSingleEpub = { viewModel.previewSingleEpub(it, isLibraryIntent = false) },
                         onSelectMultipleEpubs = { viewModel.importMultipleEpubs(it) },
-                        onAddToLibrary = { viewModel.previewSingleEpub(it, isLibraryIntent = true) },
-                        onCreateGroup = { viewModel.createGroup(it) },
-                        onRenameGroup = { id, name -> viewModel.renameGroup(id, name) },
-                        onDeleteGroup = { viewModel.deleteGroup(it) },
-                        onSetBookGroups = { bookId, groups -> viewModel.setBookGroups(bookId, groups) },
                         onNavigateToQueue = { currentScreen = Screen.QUEUE },
                         onOpenNovelDetail = { bookId -> selectedBookIdForDetail = bookId },
                         onExportEpub = onExport,
                         onPauseJob = { viewModel.pauseJob(it) },
                         onResumeJob = { viewModel.resumeJob(it) },
                         onRetryJob = { viewModel.retryFailed(it) },
+                        onDeleteBook = { viewModel.deleteBook(it) }
+                    )
+                    Screen.LIBRARY -> LibraryScreen(
+                        booksWithJobs = booksWithJobs,
+                        libraryGroups = libraryGroups,
+                        bookGroupCrossRefs = bookGroupCrossRefs,
+                        exportingBookIds = exportingBookIds,
+                        onAddToLibrary = { viewModel.previewSingleEpub(it, isLibraryIntent = true) },
+                        onCreateGroup = { viewModel.createGroup(it) },
+                        onRenameGroup = { id, name -> viewModel.renameGroup(id, name) },
+                        onDeleteGroup = { viewModel.deleteGroup(it) },
+                        onSetBookGroups = { bookId, groups -> viewModel.setBookGroups(bookId, groups) },
+                        onOpenNovelDetail = { bookId -> selectedBookIdForDetail = bookId },
+                        onExportEpub = onExport,
                         onDeleteBook = { viewModel.deleteBook(it) }
                     )
                     Screen.QUEUE -> QueueScreen(
