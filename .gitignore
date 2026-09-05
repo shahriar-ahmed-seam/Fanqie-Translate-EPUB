@@ -33,7 +33,7 @@ captures/
 .cxx/
 
 # Keystore files
-debug.keystore
+*.keystore
 !*.base64
 
 # Environment & secrets

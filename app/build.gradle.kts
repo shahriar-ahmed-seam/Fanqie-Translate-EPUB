@@ -65,30 +65,46 @@ android {
   }
 
   signingConfigs {
-    getByName("debug") {
-      val defaultKeystore = file("${rootDir}/debug.keystore")
-      if (!defaultKeystore.exists()) {
-        val base64File = file("${rootDir}/debug.keystore.base64")
+    create("release") {
+      val releaseKeystore = file("${rootDir}/release.keystore")
+      if (!releaseKeystore.exists()) {
+        val base64File = file("${rootDir}/release.keystore.base64")
         if (base64File.exists()) {
           val decoded = Base64.getDecoder().decode(base64File.readText().trim())
-          defaultKeystore.writeBytes(decoded)
+          releaseKeystore.writeBytes(decoded)
         }
       }
-      if (defaultKeystore.exists()) {
-        storeFile = defaultKeystore
-        storePassword = "android"
-        keyAlias = "androiddebugkey"
-        keyPassword = "android"
+      if (releaseKeystore.exists()) {
+        storeFile = releaseKeystore
+        storePassword = "fanqietranslate"
+        keyAlias = "epubtranslator"
+        keyPassword = "fanqietranslate"
+      }
+    }
+    getByName("debug") {
+      val releaseKeystore = file("${rootDir}/release.keystore")
+      if (!releaseKeystore.exists()) {
+        val base64File = file("${rootDir}/release.keystore.base64")
+        if (base64File.exists()) {
+          val decoded = Base64.getDecoder().decode(base64File.readText().trim())
+          releaseKeystore.writeBytes(decoded)
+        }
+      }
+      if (releaseKeystore.exists()) {
+        storeFile = releaseKeystore
+        storePassword = "fanqietranslate"
+        keyAlias = "epubtranslator"
+        keyPassword = "fanqietranslate"
       }
     }
   }
 
   buildTypes {
     debug {
-      signingConfig = signingConfigs.getByName("debug")
+      signingConfig = signingConfigs.getByName("release")
     }
     release {
-      signingConfig = signingConfigs.getByName("debug")
+      signingConfig = signingConfigs.getByName("release")
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

@@ -96,9 +96,9 @@ jobs:
           echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "Target release: ${NEXT_VERSION} (versionCode: ${VERSION_CODE}, tag: ${TAG_NAME})"
 
-      - name: Build Debug APK
+      - name: Build Release APK
         run: |
-          ./gradlew assembleDebug --no-daemon --no-configuration-cache --no-build-cache \
+          ./gradlew assembleRelease --no-daemon --no-configuration-cache --no-build-cache \
             -PversionName="${{ steps.versioning.outputs.version }}" \
             -PversionCode="${{ steps.versioning.outputs.version_code }}"
 
@@ -106,7 +106,7 @@ jobs:
         id: verify_apk
         run: |
           # 1. Verify BuildConfig.java matches target version
-          BUILDCFG=$(find app/build/generated/source/buildConfig/debug -name "BuildConfig.java" | head -n 1)
+          BUILDCFG=$(find app/build/generated/source/buildConfig/release -name "BuildConfig.java" | head -n 1)
           if [ -z "$BUILDCFG" ] || [ ! -f "$BUILDCFG" ]; then
             echo "::error::BuildConfig.java was not generated during build"
             exit 1
@@ -120,9 +120,9 @@ jobs:
           fi
 
           # 2. Locate generated APK
-          APK_FILE=$(find app/build/outputs/apk/debug -name "*.apk" ! -name "*-unaligned.apk" | head -n 1)
+          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-unaligned.apk" | head -n 1)
           if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
-            echo "::error::Debug APK was not found in app/build/outputs/apk/debug"
+            echo "::error::Release APK was not found in app/build/outputs/apk/release"
             exit 1
           fi
 
@@ -135,7 +135,7 @@ jobs:
           fi
 
           # 4. Prepare release artifact with clean versioned name
-          RELEASE_APK="app/build/outputs/apk/debug/EPUB-Translator-v${{ steps.versioning.outputs.version }}.apk"
+          RELEASE_APK="app/build/outputs/apk/release/EPUB-Translator-v${{ steps.versioning.outputs.version }}.apk"
           cp "$APK_FILE" "$RELEASE_APK"
           echo "apk_path=$RELEASE_APK" >> $GITHUB_OUTPUT
 
@@ -154,7 +154,7 @@ jobs:
           body: |
             ### EPUB Translator ${{ steps.versioning.outputs.tag }}
 
-            Automated Debug APK Release for sideloading.
+            Official Production Release APK.
             - Version: ${{ steps.versioning.outputs.version }}
             - Version Code: ${{ steps.versioning.outputs.version_code }}
           files: ${{ steps.verify_apk.outputs.apk_path }}
