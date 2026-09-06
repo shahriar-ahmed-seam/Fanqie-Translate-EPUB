@@ -914,4 +914,246 @@ class ReaderTtsManagerTest {
         assertEquals(1, manager.currentParagraphIndex.value)
         assertEquals("Second paragraph mentions harvest.", fakeClient.spokenTexts.last())
     }
+
+    @Test
+    fun testAutoAdvanceToNextChapterViaTransitionProvider() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setAutoAdvanceChapter(true)
+
+        val fakeProvider = object : ChapterTransitionProvider {
+            override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? {
+                return if (currentChapterId == "ch_1") {
+                    ChapterTransitionData(
+                        nextChapterId = "ch_2",
+                        nextChapterTitle = "Chapter 2: The Next Step",
+                        nextChapterOrder = 1,
+                        paragraphs = listOf("Chapter 2 Line 0", "Chapter 2 Line 1")
+                    )
+                } else null
+            }
+        }
+        manager.chapterTransitionProvider = fakeProvider
+
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_1",
+            newParagraphs = listOf("Chapter 1 Line 0", "Chapter 1 Line 1"),
+            continuePlaying = false,
+            startIndex = 0,
+            bookId = "book_123",
+            novelTitle = "My Novel",
+            chapterTitle = "Chapter 1: The Beginning",
+            chapterOrder = 0
+        )
+
+        // Start playing Chapter 1
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals("ch_1", manager.getCurrentChapterId())
+        assertEquals("Chapter 1 Line 0", fakeClient.spokenTexts.last())
+
+        // Complete line 0
+        val utt0 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt0)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals("Chapter 1 Line 1", fakeClient.spokenTexts.last())
+
+        // Complete line 1 (end of Chapter 1)
+        val utt1 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt1)
+        testScheduler.advanceUntilIdle()
+
+        // Verify automatic transition to Chapter 2
+        assertEquals("ch_2", manager.getCurrentChapterId())
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals("Chapter 2: The Next Step", manager.mediaMetadata.value.chapterTitle)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals("Chapter 2 Line 0", fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testMultipleConsecutiveChapterAutoAdvancements() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setAutoAdvanceChapter(true)
+
+        val fakeProvider = object : ChapterTransitionProvider {
+            override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? {
+                return when (currentChapterId) {
+                    "ch_1" -> ChapterTransitionData("ch_2", "Chapter 2", 1, listOf("Ch 2 Para 0"))
+                    "ch_2" -> ChapterTransitionData("ch_3", "Chapter 3", 2, listOf("Ch 3 Para 0"))
+                    else -> null
+                }
+            }
+        }
+        manager.chapterTransitionProvider = fakeProvider
+
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_1",
+            newParagraphs = listOf("Ch 1 Para 0"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1",
+            novelTitle = "Epic",
+            chapterTitle = "Chapter 1",
+            chapterOrder = 0
+        )
+
+        assertEquals("ch_1", manager.getCurrentChapterId())
+        assertEquals("Ch 1 Para 0", fakeClient.spokenTexts.last())
+
+        // Finish Chapter 1
+        val utt1 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt1)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("ch_2", manager.getCurrentChapterId())
+        assertEquals("Ch 2 Para 0", fakeClient.spokenTexts.last())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Finish Chapter 2
+        val utt2 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt2)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("ch_3", manager.getCurrentChapterId())
+        assertEquals("Ch 3 Para 0", fakeClient.spokenTexts.last())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Finish Chapter 3 (end of novel)
+        val utt3 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt3)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(TtsState.STOPPED, manager.ttsState.value)
+    }
+
+    @Test
+    fun testEndOfNovelStopsCleanlyWithoutError() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setAutoAdvanceChapter(true)
+
+        val fakeProvider = object : ChapterTransitionProvider {
+            override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? = null
+        }
+        manager.chapterTransitionProvider = fakeProvider
+
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_last",
+            newParagraphs = listOf("Final paragraph of novel"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+
+        val utt = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(TtsState.STOPPED, manager.ttsState.value)
+        assertNull(manager.errorMessage.value)
+    }
+
+    @Test
+    fun testPauseBeforeChapterEndDoesNotAutoAdvance() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setAutoAdvanceChapter(true)
+
+        var providerCalled = false
+        val fakeProvider = object : ChapterTransitionProvider {
+            override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? {
+                providerCalled = true
+                return ChapterTransitionData("ch_2", "Chapter 2", 1, listOf("Ch 2 P 0"))
+            }
+        }
+        manager.chapterTransitionProvider = fakeProvider
+
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_1",
+            newParagraphs = listOf("Only paragraph"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+
+        val pendingUtt = fakeClient.lastUtteranceId
+
+        // User pauses
+        manager.pause()
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+
+        // Late callback arrives from engine after pause
+        fakeClient.listener?.onDone(pendingUtt)
+        testScheduler.advanceUntilIdle()
+
+        // Should not have auto-advanced because state was PAUSED and epoch changed
+        assertFalse(providerCalled)
+        assertEquals("ch_1", manager.getCurrentChapterId())
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+    }
+
+    @Test
+    fun testManualChapterChangeWhilePlayingCancelsStaleCallbacks() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setAutoAdvanceChapter(true)
+
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_1",
+            newParagraphs = listOf("Ch 1 Line 0", "Ch 1 Line 1"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+        val staleUtt = fakeClient.lastUtteranceId
+
+        // User clicks "Next Chapter" manually
+        manager.prepareForChapterChange()
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_2",
+            newParagraphs = listOf("Ch 2 Line 0"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+
+        // Now late callback arrives for stale utterance from Ch 1
+        fakeClient.listener?.onDone(staleUtt)
+        testScheduler.advanceUntilIdle()
+
+        // Still in Ch 2, at line 0, playing Ch 2 Line 0
+        assertEquals("ch_2", manager.getCurrentChapterId())
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals("Ch 2 Line 0", fakeClient.spokenTexts.last())
+    }
 }
+

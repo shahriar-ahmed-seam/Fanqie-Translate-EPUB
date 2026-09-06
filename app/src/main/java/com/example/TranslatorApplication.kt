@@ -51,6 +51,7 @@ class TranslatorApplication : Application() {
             setSpeechRate(settingsRepository.getTtsSpeechRate())
             setAutoAdvanceChapter(settingsRepository.isTtsAutoAdvanceChapterEnabled())
             savedVoiceId = settingsRepository.getTtsVoiceId()
+            chapterTransitionProvider = com.example.tts.DefaultChapterTransitionProvider(this@TranslatorApplication) { database }
         }
 
         // Ensure service is launched to manage background queue

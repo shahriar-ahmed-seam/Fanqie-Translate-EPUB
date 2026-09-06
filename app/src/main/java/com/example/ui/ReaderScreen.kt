@@ -239,68 +239,35 @@ fun ReaderScreen(
 
     // Load translated chapter content whenever currentChapterId changes
     LaunchedEffect(currentChapterId) {
-        isLoading = true
         viewModel.setLastReadChapterId(bookId, currentChapterId)
         val savedPara = viewModel.getLastReadParagraphIndex(bookId, currentChapterId)
         lastSavedParaIndex = savedPara
 
+        // Fast path for TTS auto-advance: if TTS is already playing/loaded this chapter, use its paragraphs directly
+        if (isCurrentChapterActiveInTts && ttsManager.getParagraphs().isNotEmpty() && ttsManager.getCurrentChapterId() == currentChapterId) {
+            paragraphs = ttsManager.getParagraphs()
+            chapterTitle = ttsMetadata.chapterTitle.ifBlank {
+                chapterTitlesMap[currentChapterId] ?: currentChapter?.title ?: "Chapter ${currentChapterIndex + 1}"
+            }
+            isLoading = false
+            val activePara = ttsManager.currentParagraphIndex.value
+            if (activePara in paragraphs.indices) {
+                listState.scrollToItem((activePara + 1).coerceAtMost(paragraphs.size))
+            } else {
+                listState.scrollToItem(0)
+            }
+            return@LaunchedEffect
+        }
+
+        isLoading = true
         withContext(Dispatchers.IO) {
-            val book = db.bookDao().getBookById(bookId)
-            val job = db.jobDao().getJobByBookId(bookId)
-            val chapter = db.chapterDao().getChapterById(currentChapterId)
-
-            if (chapter != null) {
-                if (book?.isLocalBook == true || (job == null && book?.localFilePath != null)) {
-                    chapterTitle = if (chapter.title.isNotBlank()) chapter.title else "Chapter ${chapter.chapterOrder + 1}"
-                    val bookDir = File(context.filesDir, "books/$bookId")
-                    val epubFile = book?.localFilePath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
-                        ?: File(bookDir, "source.epub")
-                    if (epubFile.exists() && epubFile.length() > 0L) {
-                        val extractedParas = EpubParser.extractChapterParagraphs(epubFile, chapter.originalHref)
-                        if (extractedParas.isNotEmpty()) {
-                            paragraphs = extractedParas
-                        } else {
-                            paragraphs = listOf("This chapter is empty.")
-                        }
-                    } else {
-                        paragraphs = listOf("Source EPUB file not found.")
-                    }
-                } else {
-                    val chunks = if (job != null) {
-                        db.chunkDao().getChunksByJobAndChapter(job.id, currentChapterId)
-                    } else {
-                        db.chunkDao().getChunksByChapter(bookId, currentChapterId)
-                    }
-
-                    val titleChunk = chunks.firstOrNull { it.chunkType == "CHAPTER_TITLE" }
-                    val resolvedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() }
-                        ?: chapterTitlesMap[currentChapterId]?.takeIf { it.isNotBlank() }
-                        ?: if (chapter.title.any { it.code in 0x4e00..0x9fff }) "Chapter ${chapter.chapterOrder + 1}" else chapter.title
-                    chapterTitle = resolvedTitle
-
-                    val bodyChunks = chunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
-                    if (bodyChunks.isNotEmpty()) {
-                        val extractedParagraphs = mutableListOf<String>()
-                        for (chunk in bodyChunks) {
-                            // Strict requirement: Only translated English text is displayed. Never fall back to Chinese source text.
-                            val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: continue
-                            val rawParas = text.split(Regex("(\r?\n)+|<p[^>]*>|</p>|<br\\s*/?>"))
-                            for (p in rawParas) {
-                                val clean = p.replace(Regex("<[^>]+>"), "").trim()
-                                if (clean.isNotBlank()) {
-                                    extractedParagraphs.add(clean)
-                                }
-                            }
-                        }
-                        if (extractedParagraphs.isNotEmpty()) {
-                            paragraphs = extractedParagraphs
-                        } else {
-                            paragraphs = listOf("This chapter has not been translated yet. Please wait for translation to complete.")
-                        }
-                    } else {
-                        paragraphs = listOf("This chapter has not been translated yet. Please wait for translation to complete.")
-                    }
-                }
+            val loaded = com.example.tts.ChapterContentLoader.loadChapter(context, db, bookId, currentChapterId)
+            if (loaded != null) {
+                chapterTitle = loaded.nextChapterTitle
+                paragraphs = loaded.paragraphs
+            } else {
+                chapterTitle = "Chapter ${currentChapterIndex + 1}"
+                paragraphs = listOf("Chapter not found.")
             }
         }
         isLoading = false
@@ -793,9 +760,9 @@ fun ReaderScreen(
                         FilledTonalButton(
                             onClick = {
                                 if (prevChapter != null) {
-                                    if (isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING) {
-                                        shouldContinueTtsOnNextChapter = true
-                                    }
+                                    val wasPlaying = isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING
+                                    ttsManager.prepareForChapterChange()
+                                    shouldContinueTtsOnNextChapter = wasPlaying
                                     currentChapterId = prevChapter.id
                                 }
                             },
@@ -817,9 +784,9 @@ fun ReaderScreen(
                         FilledTonalButton(
                             onClick = {
                                 if (nextChapter != null) {
-                                    if (isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING) {
-                                        shouldContinueTtsOnNextChapter = true
-                                    }
+                                    val wasPlaying = isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING
+                                    ttsManager.prepareForChapterChange()
+                                    shouldContinueTtsOnNextChapter = wasPlaying
                                     currentChapterId = nextChapter.id
                                 }
                             },
@@ -1054,9 +1021,9 @@ fun ReaderScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    if (ttsState == TtsState.PLAYING) {
-                                        shouldContinueTtsOnNextChapter = true
-                                    }
+                                    val wasPlaying = isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING
+                                    ttsManager.prepareForChapterChange()
+                                    shouldContinueTtsOnNextChapter = wasPlaying
                                     currentChapterId = chapter.id
                                     showChapterPickerSheet = false
                                 }

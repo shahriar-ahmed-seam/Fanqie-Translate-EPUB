@@ -234,13 +234,6 @@ class TtsPlaybackService : Service() {
         val settingsRepo = app.settingsRepository
         val database = app.database
 
-        // Connect chapter completion to background chapter progression
-        ttsManager.onChapterComplete = {
-            serviceScope.launch(Dispatchers.IO) {
-                handleBackgroundChapterEnd(ttsManager, database)
-            }
-        }
-
         // Automatic position persistence hook
         ttsManager.onPositionChanged = { paraIndex, state ->
             val meta = ttsManager.mediaMetadata.value
@@ -256,6 +249,8 @@ class TtsPlaybackService : Service() {
                         voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId
                     )
                 )
+                settingsRepo.setLastReadChapterId(meta.bookId, meta.chapterId)
+                settingsRepo.setLastReadParagraphIndex(meta.bookId, meta.chapterId, paraIndex)
             }
         }
 
@@ -325,68 +320,6 @@ class TtsPlaybackService : Service() {
                     stopServiceSafely()
                 }
             }
-        }
-    }
-
-    private suspend fun handleBackgroundChapterEnd(
-        ttsManager: ReaderTtsManager,
-        database: com.example.data.db.AppDatabase
-    ) {
-        if (!ttsManager.autoAdvanceChapter.value) {
-            ttsManager.stop()
-            return
-        }
-
-        val meta = ttsManager.mediaMetadata.value
-        if (meta.bookId.isBlank() || meta.chapterId.isBlank()) {
-            ttsManager.stop()
-            return
-        }
-
-        val chapters = database.chapterDao().getChaptersByBook(meta.bookId)
-        val currentIndex = chapters.indexOfFirst { it.id == meta.chapterId }
-        if (currentIndex in 0 until chapters.size - 1) {
-            val nextChapter = chapters[currentIndex + 1]
-            val job = database.jobDao().getJobByBookId(meta.bookId)
-            val chunks = if (job != null) {
-                database.chunkDao().getChunksByJobAndChapter(job.id, nextChapter.id)
-            } else {
-                database.chunkDao().getChunksByChapter(meta.bookId, nextChapter.id)
-            }
-
-            val titleChunk = chunks.firstOrNull { it.chunkType == "CHAPTER_TITLE" }
-            val nextTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() }
-                ?: if (nextChapter.title.any { it.code in 0x4e00..0x9fff }) "Chapter ${nextChapter.chapterOrder + 1}" else nextChapter.title
-
-            val bodyChunks = chunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
-            val nextParagraphs = mutableListOf<String>()
-            for (chunk in bodyChunks) {
-                val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: continue
-                val rawParas = text.split(Regex("(\r?\n)+|<p[^>]*>|</p>|<br\\s*/?>"))
-                for (p in rawParas) {
-                    val clean = p.replace(Regex("<[^>]+>"), "").trim()
-                    if (clean.isNotBlank()) {
-                        nextParagraphs.add(clean)
-                    }
-                }
-            }
-
-            if (nextParagraphs.isNotEmpty()) {
-                ttsManager.setChapterAndParagraphs(
-                    chapterId = nextChapter.id,
-                    newParagraphs = nextParagraphs,
-                    continuePlaying = true,
-                    startIndex = 0,
-                    bookId = meta.bookId,
-                    novelTitle = meta.novelTitle,
-                    chapterTitle = nextTitle,
-                    chapterOrder = nextChapter.chapterOrder
-                )
-            } else {
-                ttsManager.stop()
-            }
-        } else {
-            ttsManager.stop()
         }
     }
 
@@ -561,6 +494,11 @@ class TtsPlaybackService : Service() {
     override fun onDestroy() {
         observationJob?.cancel()
         serviceScope.cancel()
+
+        val app = applicationContext as? TranslatorApplication
+        app?.ttsManager?.let { tm ->
+            tm.onPositionChanged = null
+        }
 
         try {
             if (wakeLock?.isHeld == true) {
