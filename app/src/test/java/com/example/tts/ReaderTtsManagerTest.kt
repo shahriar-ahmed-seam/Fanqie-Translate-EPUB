@@ -1155,5 +1155,76 @@ class ReaderTtsManagerTest {
         assertEquals(0, manager.currentParagraphIndex.value)
         assertEquals("Ch 2 Line 0", fakeClient.spokenTexts.last())
     }
+
+    @Test
+    fun testUtteranceErrorSkipsProblematicParagraphAndContinuesPlayback() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_1",
+            newParagraphs = listOf("Para 0", "Para 1 Problematic", "Para 2 Good"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals("Para 0", fakeClient.spokenTexts.last())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Paragraph 0 finishes cleanly
+        val utt0 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(utt0)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals("Para 1 Problematic", fakeClient.spokenTexts.last())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Paragraph 1 fails synthesis asynchronously with ERROR_SYNTHESIS
+        val utt1 = fakeClient.lastUtteranceId
+        fakeClient.listener?.onError(utt1, TextToSpeech.ERROR_SYNTHESIS)
+        testScheduler.advanceUntilIdle()
+
+        // It should skip Paragraph 1 without crashing or stopping, advancing to Paragraph 2
+        assertEquals(2, manager.currentParagraphIndex.value)
+        assertEquals("Para 2 Good", fakeClient.spokenTexts.last())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+    }
+
+    @Test
+    fun testAudioFocusLossPausesPlaybackAndGainResumes() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_1",
+            newParagraphs = listOf("Para 0", "Para 1"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Simulate external audio interruption (call or navigation audio focus loss)
+        manager.audioFocusManager.abandonAudioFocus()
+        manager.pause()
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+
+        // External audio finishes, focus regained, playback resumes
+        manager.resume()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+    }
 }
 

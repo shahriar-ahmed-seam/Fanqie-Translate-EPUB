@@ -123,10 +123,21 @@ class TtsPlaybackService : Service() {
         val app = applicationContext as? TranslatorApplication
         val ttsManager = app?.ttsManager
 
-        mediaSession = MediaSessionCompat(this, "TtsPlaybackService").apply {
+        val mediaButtonReceiver = android.content.ComponentName(this, androidx.media.session.MediaButtonReceiver::class.java)
+        val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            component = mediaButtonReceiver
+        }
+        val mediaButtonPendingIntent = PendingIntent.getBroadcast(
+            this,
+            0,
+            mediaButtonIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        mediaSession = MediaSessionCompat(this, "TtsPlaybackService", mediaButtonReceiver, mediaButtonPendingIntent).apply {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
-                    ttsManager?.resume()
+                    handlePlayRequest(app)
                 }
 
                 override fun onPause() {
@@ -145,8 +156,65 @@ class TtsPlaybackService : Service() {
                     ttsManager?.stop()
                     stopServiceSafely()
                 }
+
+                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    return super.onMediaButtonEvent(mediaButtonEvent)
+                }
             })
+            setMediaButtonReceiver(mediaButtonPendingIntent)
             isActive = true
+        }
+    }
+
+    private fun handlePlayRequest(app: TranslatorApplication?) {
+        val ttsManager = app?.ttsManager ?: return
+        when (ttsManager.ttsState.value) {
+            TtsState.PAUSED -> ttsManager.resume()
+            TtsState.PLAYING -> { /* Already playing */ }
+            else -> {
+                if (ttsManager.getParagraphs().isNotEmpty()) {
+                    ttsManager.play(startIndex = ttsManager.currentParagraphIndex.value)
+                } else {
+                    serviceScope.launch {
+                        restoreSessionIfPossible(app, autoPlay = true)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun restoreSessionIfPossible(app: TranslatorApplication, autoPlay: Boolean = false) {
+        try {
+            val settingsRepo = app.settingsRepository
+            val session = settingsRepo.getTtsSessionState() ?: return
+            if (session.bookId.isBlank() || session.chapterId.isBlank()) return
+
+            val data = ChapterContentLoader.loadChapter(
+                context = applicationContext,
+                database = app.database,
+                bookId = session.bookId,
+                chapterId = session.chapterId
+            ) ?: return
+
+            val book = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                app.database.bookDao().getBookById(session.bookId)
+            }
+            val novelTitle = book?.title ?: "Audiobook"
+
+            val ttsManager = app.ttsManager
+            ttsManager.setChapterAndParagraphs(
+                chapterId = data.nextChapterId,
+                newParagraphs = data.paragraphs,
+                continuePlaying = autoPlay,
+                startIndex = session.paragraphIndex,
+                bookId = session.bookId,
+                novelTitle = novelTitle,
+                chapterTitle = data.nextChapterTitle,
+                chapterOrder = data.nextChapterOrder
+            )
+            Log.i(TAG, "Restored TTS session for book ${session.bookId}, chapter ${session.chapterId}, para ${session.paragraphIndex}")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore TTS session from repository", e)
         }
     }
 
@@ -170,9 +238,13 @@ class TtsPlaybackService : Service() {
         val app = applicationContext as? TranslatorApplication
         val ttsManager = app?.ttsManager ?: return START_NOT_STICKY
 
+        if (intent != null) {
+            androidx.media.session.MediaButtonReceiver.handleIntent(mediaSession, intent)
+        }
+
         when (intent?.action) {
             ACTION_PLAY -> {
-                ttsManager.resume()
+                handlePlayRequest(app)
             }
             ACTION_PAUSE -> {
                 ttsManager.pause()
@@ -181,7 +253,7 @@ class TtsPlaybackService : Service() {
                 if (ttsManager.ttsState.value == TtsState.PLAYING) {
                     ttsManager.pause()
                 } else {
-                    ttsManager.resume()
+                    handlePlayRequest(app)
                 }
             }
             ACTION_NEXT -> {
@@ -198,6 +270,15 @@ class TtsPlaybackService : Service() {
             ACTION_START -> {
                 // Ensure service is running in foreground
                 updateNotification(ttsManager)
+            }
+            null -> {
+                // Recover from process recreation (START_STICKY restarted service with null intent)
+                Log.i(TAG, "TtsPlaybackService restarted with null intent. Checking session recovery...")
+                if (ttsManager.getParagraphs().isEmpty()) {
+                    serviceScope.launch {
+                        restoreSessionIfPossible(app, autoPlay = false)
+                    }
+                }
             }
         }
 
@@ -267,7 +348,8 @@ class TtsPlaybackService : Service() {
                 if (state == TtsState.PLAYING) {
                     try {
                         if (wakeLock?.isHeld == false) {
-                            wakeLock?.acquire(30 * 60 * 1000L) // 30 min safety timeout
+                            wakeLock?.acquire()
+                            Log.d(TAG, "WakeLock acquired for playback")
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "WakeLock acquire error", e)
@@ -276,6 +358,7 @@ class TtsPlaybackService : Service() {
                     try {
                         if (wakeLock?.isHeld == true) {
                             wakeLock?.release()
+                            Log.d(TAG, "WakeLock released")
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "WakeLock release error", e)

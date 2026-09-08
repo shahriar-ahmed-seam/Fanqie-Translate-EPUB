@@ -82,7 +82,18 @@ fun ReaderScreen(
     val app = context.applicationContext as? TranslatorApplication
     val ttsManager = remember { app?.ttsManager ?: ReaderTtsManager(context.applicationContext) }
 
-    var currentChapterId by rememberSaveable(bookId) { mutableStateOf(initialChapterId) }
+    var currentChapterId by rememberSaveable(bookId) {
+        val meta = app?.ttsManager?.mediaMetadata?.value
+        val activeState = app?.ttsManager?.ttsState?.value
+        val activeChapter = if ((activeState == TtsState.PLAYING || activeState == TtsState.PAUSED) &&
+            meta?.bookId == bookId && !meta.chapterId.isNullOrBlank()
+        ) {
+            meta.chapterId
+        } else {
+            initialChapterId
+        }
+        mutableStateOf(activeChapter)
+    }
 
     val listState = rememberLazyListState()
     val tocListState = rememberLazyListState()
@@ -287,7 +298,16 @@ fun ReaderScreen(
             if (activePara in paragraphs.indices) {
                 listState.scrollToItem((activePara + 1).coerceAtMost(paragraphs.size))
             }
-        } else if (!isAnotherNovelOrChapterPlaying) {
+        } else if (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) {
+            // TTS session is actively running or paused in background.
+            // Under NO circumstance should this reader screen call setChapterAndParagraphs or disrupt playback.
+            if (savedPara > 0 && savedPara < paragraphs.size) {
+                listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
+            } else {
+                listState.scrollToItem(0)
+            }
+        } else {
+            // TTS is IDLE or STOPPED: safely prepare chapter in manager for reading
             val startPara = if (resumeTts) 0 else savedPara
             ttsManager.setChapterAndParagraphs(
                 chapterId = currentChapterId,
@@ -302,14 +322,6 @@ fun ReaderScreen(
             if (!resumeTts && savedPara > 0 && savedPara < paragraphs.size) {
                 listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
             } else if (!resumeTts) {
-                listState.scrollToItem(0)
-            }
-        } else {
-            // Another novel or chapter is playing in the background:
-            // Do NOT touch ttsManager so background playback is preserved.
-            if (savedPara > 0 && savedPara < paragraphs.size) {
-                listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
-            } else {
                 listState.scrollToItem(0)
             }
         }

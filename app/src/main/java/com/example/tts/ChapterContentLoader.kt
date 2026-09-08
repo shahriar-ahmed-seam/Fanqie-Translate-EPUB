@@ -32,8 +32,8 @@ object ChapterContentLoader : ChapterTransitionProvider {
         database: AppDatabase,
         bookId: String,
         chapterId: String
-    ): ChapterTransitionData? {
-        val chapter = database.chapterDao().getChapterById(chapterId) ?: return null
+    ): ChapterTransitionData? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val chapter = database.chapterDao().getChapterById(chapterId) ?: return@withContext null
         val book = database.bookDao().getBookById(bookId)
         val job = database.jobDao().getJobByBookId(bookId)
 
@@ -50,7 +50,7 @@ object ChapterContentLoader : ChapterTransitionProvider {
                 listOf("Source EPUB file not found.")
             }
 
-            return ChapterTransitionData(
+            ChapterTransitionData(
                 nextChapterId = chapter.id,
                 nextChapterTitle = title,
                 nextChapterOrder = chapter.chapterOrder,
@@ -86,7 +86,7 @@ object ChapterContentLoader : ChapterTransitionProvider {
                 listOf("This chapter has not been translated yet. Please wait for translation to complete.")
             }
 
-            return ChapterTransitionData(
+            ChapterTransitionData(
                 nextChapterId = chapter.id,
                 nextChapterTitle = resolvedTitle,
                 nextChapterOrder = chapter.chapterOrder,
@@ -99,10 +99,10 @@ object ChapterContentLoader : ChapterTransitionProvider {
         database: AppDatabase,
         bookId: String,
         currentChapterId: String
-    ): ChapterEntity? {
+    ): ChapterEntity? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val chapters = database.chapterDao().getChaptersByBook(bookId)
         val currentIndex = chapters.indexOfFirst { it.id == currentChapterId }
-        return if (currentIndex in 0 until chapters.size - 1) {
+        if (currentIndex in 0 until chapters.size - 1) {
             chapters[currentIndex + 1]
         } else {
             null
@@ -113,10 +113,10 @@ object ChapterContentLoader : ChapterTransitionProvider {
         database: AppDatabase,
         bookId: String,
         currentChapterId: String
-    ): ChapterEntity? {
+    ): ChapterEntity? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val chapters = database.chapterDao().getChaptersByBook(bookId)
         val currentIndex = chapters.indexOfFirst { it.id == currentChapterId }
-        return if (currentIndex > 0 && currentIndex < chapters.size) {
+        if (currentIndex > 0 && currentIndex < chapters.size) {
             chapters[currentIndex - 1]
         } else {
             null
@@ -143,15 +143,17 @@ class DefaultChapterTransitionProvider(
     private val databaseProvider: () -> AppDatabase
 ) : ChapterTransitionProvider {
 
-    override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? {
-        val db = databaseProvider()
-        val nextChapter = ChapterContentLoader.getNextChapter(db, bookId, currentChapterId) ?: return null
-        return ChapterContentLoader.loadChapter(context, db, bookId, nextChapter.id)
-    }
+    override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val db = databaseProvider()
+            val nextChapter = ChapterContentLoader.getNextChapter(db, bookId, currentChapterId) ?: return@withContext null
+            ChapterContentLoader.loadChapter(context, db, bookId, nextChapter.id)
+        }
 
-    override suspend fun getPreviousChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? {
-        val db = databaseProvider()
-        val prevChapter = ChapterContentLoader.getPreviousChapter(db, bookId, currentChapterId) ?: return null
-        return ChapterContentLoader.loadChapter(context, db, bookId, prevChapter.id)
-    }
+    override suspend fun getPreviousChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val db = databaseProvider()
+            val prevChapter = ChapterContentLoader.getPreviousChapter(db, bookId, currentChapterId) ?: return@withContext null
+            ChapterContentLoader.loadChapter(context, db, bookId, prevChapter.id)
+        }
 }

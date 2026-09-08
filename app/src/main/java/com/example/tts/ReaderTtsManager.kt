@@ -67,6 +67,18 @@ interface TextToSpeechClient {
 class AndroidTextToSpeechClient(
     private val tts: TextToSpeech
 ) : TextToSpeechClient {
+    init {
+        try {
+            val audioAttributes = android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            tts.setAudioAttributes(audioAttributes)
+        } catch (e: Exception) {
+            Log.w("AndroidTextToSpeechClient", "Failed to set audio attributes on TTS engine", e)
+        }
+    }
+
     override fun speak(text: CharSequence, queueMode: Int, params: Bundle?, utteranceId: String?): Int {
         return tts.speak(text, queueMode, params, utteranceId)
     }
@@ -154,8 +166,29 @@ class ReaderTtsManager(
     private val isInitializing = java.util.concurrent.atomic.AtomicBoolean(false)
     private var isReleased = false
     private var wasPlayingBeforeBackground = false
+    private var wasPlayingBeforeEngineReinit = false
+    private var currentVolume: Float = 1.0f
     var savedVoiceId: String? = null
     private var pendingInitCallback: (() -> Unit)? = null
+
+    val audioFocusManager: TtsAudioManager = TtsAudioManager(
+        context = context.applicationContext,
+        onAudioFocusLoss = {
+            pause()
+        },
+        onAudioFocusTransientLoss = {
+            pause()
+        },
+        onAudioFocusGain = {
+            resume()
+        },
+        onAudioFocusDuck = { duckRatio ->
+            currentVolume = duckRatio
+            if (_ttsState.value == TtsState.PLAYING) {
+                speakCurrentParagraph(currentSubChunkIndex)
+            }
+        }
+    )
 
     init {
         initializeEngine()
@@ -185,8 +218,11 @@ class ReaderTtsManager(
         // UI reattaches seamlessly to ongoing playback.
     }
 
-    fun reinitialize(onSuccess: (() -> Unit)? = null) {
+    fun reinitialize(resumeOnReady: Boolean = false, onSuccess: (() -> Unit)? = null) {
         if (isReleased) return
+        if (resumeOnReady || _ttsState.value == TtsState.PLAYING) {
+            wasPlayingBeforeEngineReinit = true
+        }
         try {
             activeUtteranceId = null
             ttsClient?.stop()
@@ -273,9 +309,16 @@ class ReaderTtsManager(
                     // Apply speech rate
                     client.setSpeechRate(_speechRate.value)
 
-                    _ttsState.value = TtsState.IDLE
                     _errorMessage.value = null
                     Log.i(TAG, "Android TTS engine initialized successfully.")
+
+                    if (wasPlayingBeforeEngineReinit && paragraphs.isNotEmpty()) {
+                        wasPlayingBeforeEngineReinit = false
+                        _ttsState.value = TtsState.PLAYING
+                        speakCurrentParagraph(currentSubChunkIndex)
+                    } else {
+                        _ttsState.value = TtsState.IDLE
+                    }
 
                     pendingInitCallback?.invoke()
                     pendingInitCallback = null
@@ -490,6 +533,7 @@ class ReaderTtsManager(
         currentSubChunks = emptyList()
 
         _ttsState.value = TtsState.PLAYING
+        audioFocusManager.requestAudioFocus()
         try {
             val meta = _mediaMetadata.value
             TtsPlaybackService.start(context.applicationContext, meta.bookId, meta.chapterId)
@@ -527,6 +571,7 @@ class ReaderTtsManager(
         if (isReleased) return
         if (_ttsState.value == TtsState.PAUSED) {
             _ttsState.value = TtsState.PLAYING
+            audioFocusManager.requestAudioFocus()
             try {
                 val meta = _mediaMetadata.value
                 TtsPlaybackService.start(context.applicationContext, meta.bookId, meta.chapterId)
@@ -555,6 +600,7 @@ class ReaderTtsManager(
             Log.w(TAG, "Error stopping TTS", e)
         }
         _ttsState.value = TtsState.STOPPED
+        audioFocusManager.abandonAudioFocus()
         onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.STOPPED)
     }
 
@@ -731,7 +777,8 @@ class ReaderTtsManager(
             activeUtteranceId = utteranceId
 
             val params = Bundle().apply {
-                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, currentVolume)
+                putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_MUSIC)
             }
 
             val result = client.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
@@ -740,7 +787,7 @@ class ReaderTtsManager(
                 if (result == TextToSpeech.ERROR_INVALID_REQUEST || result == TextToSpeech.ERROR_SERVICE) {
                     _errorMessage.value = "Speech engine busy. Reconnecting..."
                     _ttsState.value = TtsState.ERROR
-                    reinitialize()
+                    reinitialize(resumeOnReady = true)
                 } else {
                     _errorMessage.value = "Speech playback encountered an issue"
                     _ttsState.value = TtsState.ERROR
@@ -769,7 +816,8 @@ class ReaderTtsManager(
             val nextUtteranceId = "utt_${currentChapterId}_${_currentParagraphIndex.value}_${currentSubChunkIndex}_${++utteranceSeq}"
             activeUtteranceId = nextUtteranceId
             val params = Bundle().apply {
-                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, currentVolume)
+                putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_MUSIC)
             }
             ttsClient?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, params, nextUtteranceId)
             return
@@ -875,22 +923,41 @@ class ReaderTtsManager(
             when (errorCode) {
                 TextToSpeech.ERROR_INVALID_REQUEST, TextToSpeech.ERROR_SERVICE -> {
                     _errorMessage.value = "Speech engine busy. Reconnecting..."
-                    _ttsState.value = TtsState.ERROR
-                    reinitialize()
+                    reinitialize(resumeOnReady = true)
                 }
                 TextToSpeech.ERROR_NOT_INSTALLED_YET -> {
                     _errorMessage.value = "Voice data is not installed yet"
                     _ttsState.value = TtsState.ERROR
+                    audioFocusManager.abandonAudioFocus()
                 }
                 TextToSpeech.ERROR_NETWORK, TextToSpeech.ERROR_NETWORK_TIMEOUT -> {
                     _errorMessage.value = "Voice requires network connection"
                     _ttsState.value = TtsState.ERROR
+                    audioFocusManager.abandonAudioFocus()
                 }
                 else -> {
-                    _errorMessage.value = "Speech playback encountered an issue"
-                    _ttsState.value = TtsState.ERROR
+                    Log.w(TAG, "Speech synthesis error ($errorCode) for paragraph ${_currentParagraphIndex.value}, advancing to next paragraph...")
+                    advanceToNextParagraphOnError()
                 }
             }
+        }
+    }
+
+    private fun advanceToNextParagraphOnError() {
+        activeUtteranceId = null
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
+        val bookId = _mediaMetadata.value.bookId.ifBlank { null }
+        var nextIndex = _currentParagraphIndex.value + 1
+        while (nextIndex < paragraphs.size - 1 && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
+            nextIndex++
+        }
+        if (nextIndex < paragraphs.size) {
+            _currentParagraphIndex.value = nextIndex
+            onPositionChanged?.invoke(nextIndex, TtsState.PLAYING)
+            speakCurrentParagraph(0)
+        } else {
+            handleChapterEnd()
         }
     }
 
@@ -900,6 +967,7 @@ class ReaderTtsManager(
     fun release() {
         if (isReleased) return
         isReleased = true
+        audioFocusManager.abandonAudioFocus()
         try {
             ttsClient?.stop()
             ttsClient?.shutdown()
