@@ -417,7 +417,7 @@ class ReaderTtsManager(
     private var activeUtteranceId: String? = null
     private var playbackSessionEpoch: Long = 0L
     private var engineGeneration: Long = 1L
-    private var isAdvancingChapter: Boolean = false
+    private val isAdvancingChapter = java.util.concurrent.atomic.AtomicBoolean(false)
     private val isInitializing = java.util.concurrent.atomic.AtomicBoolean(false)
     private var isReleased = false
     private var wasPlayingBeforeBackground = false
@@ -784,7 +784,7 @@ class ReaderTtsManager(
      */
     fun prepareForChapterChange() {
         playbackSessionEpoch++
-        isAdvancingChapter = false
+        isAdvancingChapter.set(false)
         activeUtteranceId = null
         currentSubChunkIndex = 0
         currentSubChunks = emptyList()
@@ -814,7 +814,7 @@ class ReaderTtsManager(
         if (isReleased) return
 
         playbackSessionEpoch++
-        isAdvancingChapter = false
+        isAdvancingChapter.set(false)
 
         val chapterChanged = currentChapterId != chapterId
         currentChapterId = chapterId
@@ -953,7 +953,7 @@ class ReaderTtsManager(
     fun pause(isExplicitUserAction: Boolean = true) {
         if (isReleased) return
         playbackSessionEpoch++
-        isAdvancingChapter = false
+        isAdvancingChapter.set(false)
         wasPlayingBeforeEngineReinit = false
         if (isExplicitUserAction) {
             audioFocusManager.clearTransientLoss()
@@ -1008,7 +1008,7 @@ class ReaderTtsManager(
     fun stop() {
         if (isReleased) return
         playbackSessionEpoch++
-        isAdvancingChapter = false
+        isAdvancingChapter.set(false)
         wasPlayingBeforeEngineReinit = false
         activeUtteranceId = null
         currentSubChunkIndex = 0
@@ -1032,45 +1032,52 @@ class ReaderTtsManager(
     /**
      * Moves to the previous paragraph. If playing, begins speaking it immediately.
      * Safely skips backward past any paragraphs omitted by TTS rules.
+     * If already at the first paragraph of the chapter, navigates to the final speech unit of the previous chapter.
      */
     fun previousParagraph() {
         if (isReleased || paragraphs.isEmpty()) return
         val bookId = _mediaMetadata.value.bookId.ifBlank { null }
-        var prevIndex = (_currentParagraphIndex.value - 1).coerceAtLeast(0)
-        while (prevIndex > 0 && textProcessor.process(paragraphs[prevIndex].trim(), bookId).isBlank()) {
+        var prevIndex = _currentParagraphIndex.value - 1
+        while (prevIndex >= 0 && textProcessor.process(paragraphs[prevIndex].trim(), bookId).isBlank()) {
             prevIndex--
         }
-        _currentParagraphIndex.value = prevIndex
-        currentSubChunkIndex = 0
-        currentSubChunks = emptyList()
-        notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
+        if (prevIndex >= 0) {
+            _currentParagraphIndex.value = prevIndex
+            currentSubChunkIndex = 0
+            currentSubChunks = emptyList()
+            notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
 
-        if (_ttsState.value == TtsState.PLAYING) {
-            activeUtteranceId = null
-            try {
-                ttsClient?.stop()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error stopping active speech on previousParagraph", e)
+            if (_ttsState.value == TtsState.PLAYING) {
+                activeUtteranceId = null
+                try {
+                    ttsClient?.stop()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error stopping active speech on previousParagraph", e)
+                }
+                speakCurrentParagraph(0)
             }
-            speakCurrentParagraph(0)
+        } else {
+            // At the first line of current chapter: transition to previous chapter's final speech unit
+            handlePreviousChapter()
         }
     }
 
     /**
      * Moves to the next paragraph. If at the end, stops or triggers chapter advance.
      * Safely skips forward past any paragraphs omitted by TTS rules.
+     * If already at the final paragraph, transitions to the first speech unit of the next chapter.
      */
     fun nextParagraph() {
         if (isReleased || paragraphs.isEmpty()) return
         val bookId = _mediaMetadata.value.bookId.ifBlank { null }
         var nextIndex = _currentParagraphIndex.value + 1
-        while (nextIndex < paragraphs.size - 1 && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
+        while (nextIndex < paragraphs.size && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
             nextIndex++
         }
-        currentSubChunkIndex = 0
-        currentSubChunks = emptyList()
         if (nextIndex < paragraphs.size) {
             _currentParagraphIndex.value = nextIndex
+            currentSubChunkIndex = 0
+            currentSubChunks = emptyList()
             notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
             if (_ttsState.value == TtsState.PLAYING) {
                 activeUtteranceId = null
@@ -1082,7 +1089,7 @@ class ReaderTtsManager(
                 speakCurrentParagraph(0)
             }
         } else {
-            handleChapterEnd()
+            handleChapterEnd(continuePlaying = (_ttsState.value == TtsState.PLAYING), isExplicitUserAction = true)
         }
     }
 
@@ -1320,13 +1327,21 @@ class ReaderTtsManager(
         return null
     }
 
-    private fun handleChapterEnd() {
+    private fun handleChapterEnd(
+        continuePlaying: Boolean = (_ttsState.value == TtsState.PLAYING),
+        isExplicitUserAction: Boolean = false
+    ) {
         activeUtteranceId = null
         currentSubChunkIndex = 0
         currentSubChunks = emptyList()
 
-        if (!_autoAdvanceChapter.value || _ttsState.value != TtsState.PLAYING) {
+        if (!isExplicitUserAction && (!_autoAdvanceChapter.value || _ttsState.value != TtsState.PLAYING)) {
             stop()
+            return
+        }
+
+        if (!isAdvancingChapter.compareAndSet(false, true)) {
+            Log.d(TAG, "Chapter advancement already in progress; discarding duplicate trigger")
             return
         }
 
@@ -1335,6 +1350,7 @@ class ReaderTtsManager(
             val bookId = _mediaMetadata.value.bookId
             val chapterId = _mediaMetadata.value.chapterId
             if (bookId.isBlank() || chapterId.isBlank()) {
+                isAdvancingChapter.set(false)
                 try {
                     if (onChapterComplete != null) {
                         onChapterComplete?.invoke()
@@ -1349,20 +1365,38 @@ class ReaderTtsManager(
             }
 
             val currentEpoch = ++playbackSessionEpoch
-            isAdvancingChapter = true
 
             launchSafe("handleChapterEnd") {
+                var loadError: Throwable? = null
                 val nextData = try {
                     provider.getNextChapterContent(bookId, chapterId)
                 } catch (e: CancellationException) {
+                    isAdvancingChapter.set(false)
                     throw e
                 } catch (e: Throwable) {
                     Log.e(TAG, "Error loading next chapter content", e)
+                    loadError = e
                     null
                 }
 
-                if (playbackSessionEpoch != currentEpoch || _ttsState.value != TtsState.PLAYING || !isAdvancingChapter) {
-                    isAdvancingChapter = false
+                if (playbackSessionEpoch != currentEpoch || !isAdvancingChapter.get()) {
+                    isAdvancingChapter.set(false)
+                    return@launchSafe
+                }
+
+                if (loadError != null) {
+                    // Next chapter was unavailable due to an error; enter recoverable state
+                    Log.w(TAG, "Next chapter unavailable due to error: ${loadError.message}; entering recoverable error state")
+                    isAdvancingChapter.set(false)
+                    _errorMessage.value = "Failed to load next chapter: ${loadError.message ?: "Unknown error"}"
+                    stop()
+                    notifyAndPersistPosition(
+                        _currentParagraphIndex.value,
+                        TtsState.STOPPED,
+                        subChunkIndex = 0,
+                        wasActivelyPlaying = false,
+                        interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                    )
                     return@launchSafe
                 }
 
@@ -1370,13 +1404,14 @@ class ReaderTtsManager(
                     setChapterAndParagraphs(
                         chapterId = nextData.nextChapterId,
                         newParagraphs = nextData.paragraphs,
-                        continuePlaying = true,
+                        continuePlaying = continuePlaying,
                         startIndex = 0,
                         startSubChunk = 0,
                         bookId = bookId,
                         novelTitle = _mediaMetadata.value.novelTitle,
                         chapterTitle = nextData.nextChapterTitle,
-                        chapterOrder = nextData.nextChapterOrder
+                        chapterOrder = nextData.nextChapterOrder,
+                        targetState = if (continuePlaying) null else TtsState.PAUSED
                     )
                     try {
                         onChapterComplete?.invoke()
@@ -1384,7 +1419,8 @@ class ReaderTtsManager(
                         Log.w(TAG, "Error invoking onChapterComplete", e)
                     }
                 } else {
-                    // End of novel or no speakable content in next chapter
+                    // Clean end of novel or no speakable content in next chapter
+                    _errorMessage.value = null
                     stop()
                     notifyAndPersistPosition(
                         _currentParagraphIndex.value,
@@ -1399,9 +1435,10 @@ class ReaderTtsManager(
                         Log.w(TAG, "Error invoking onChapterComplete", e)
                     }
                 }
-                isAdvancingChapter = false
+                isAdvancingChapter.set(false)
             }
         } else {
+            isAdvancingChapter.set(false)
             try {
                 if (onChapterComplete != null) {
                     onChapterComplete?.invoke()
@@ -1412,6 +1449,95 @@ class ReaderTtsManager(
                 Log.w(TAG, "Error during chapter end fallback", e)
                 stop()
             }
+        }
+    }
+
+    private fun handlePreviousChapter() {
+        activeUtteranceId = null
+        currentSubChunkIndex = 0
+        currentSubChunks = emptyList()
+
+        if (!isAdvancingChapter.compareAndSet(false, true)) {
+            Log.d(TAG, "Chapter transition already in progress; discarding duplicate previous chapter trigger")
+            return
+        }
+
+        val provider = getResolvedChapterTransitionProvider()
+        if (provider == null) {
+            isAdvancingChapter.set(false)
+            return
+        }
+
+        val bookId = _mediaMetadata.value.bookId
+        val chapterId = _mediaMetadata.value.chapterId
+        if (bookId.isBlank() || chapterId.isBlank()) {
+            isAdvancingChapter.set(false)
+            return
+        }
+
+        val wasPlaying = (_ttsState.value == TtsState.PLAYING)
+        if (wasPlaying) {
+            try {
+                ttsClient?.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping active speech before navigating to previous chapter", e)
+            }
+        }
+
+        val currentEpoch = ++playbackSessionEpoch
+
+        launchSafe("handlePreviousChapter") {
+            var loadError: Throwable? = null
+            val prevData = try {
+                provider.getPreviousChapterContent(bookId, chapterId)
+            } catch (e: CancellationException) {
+                isAdvancingChapter.set(false)
+                throw e
+            } catch (e: Throwable) {
+                Log.e(TAG, "Error loading previous chapter content", e)
+                loadError = e
+                null
+            }
+
+            if (playbackSessionEpoch != currentEpoch || !isAdvancingChapter.get()) {
+                isAdvancingChapter.set(false)
+                return@launchSafe
+            }
+
+            if (loadError != null) {
+                isAdvancingChapter.set(false)
+                _errorMessage.value = "Failed to load previous chapter: ${loadError.message ?: "Unknown error"}"
+                return@launchSafe
+            }
+
+            if (prevData != null && prevData.paragraphs.isNotEmpty()) {
+                var lastIndex = prevData.paragraphs.size - 1
+                while (lastIndex > 0 && textProcessor.process(prevData.paragraphs[lastIndex].trim(), bookId).isBlank()) {
+                    lastIndex--
+                }
+                lastIndex = lastIndex.coerceAtLeast(0)
+
+                setChapterAndParagraphs(
+                    chapterId = prevData.nextChapterId,
+                    newParagraphs = prevData.paragraphs,
+                    continuePlaying = wasPlaying,
+                    startIndex = lastIndex,
+                    startSubChunk = 0,
+                    bookId = bookId,
+                    novelTitle = _mediaMetadata.value.novelTitle,
+                    chapterTitle = prevData.nextChapterTitle,
+                    chapterOrder = prevData.nextChapterOrder,
+                    targetState = if (wasPlaying) null else TtsState.PAUSED
+                )
+            } else {
+                // At the beginning of novel; stay at start of current chapter
+                _currentParagraphIndex.value = 0
+                notifyAndPersistPosition(0, _ttsState.value)
+                if (wasPlaying) {
+                    speakCurrentParagraph(0)
+                }
+            }
+            isAdvancingChapter.set(false)
         }
     }
 
@@ -1495,6 +1621,7 @@ class ReaderTtsManager(
         isReleased = true
         isEngineReady.set(false)
         isRecovering.set(false)
+        isAdvancingChapter.set(false)
         playbackSessionEpoch++
         engineGeneration++
         activeUtteranceId = null
