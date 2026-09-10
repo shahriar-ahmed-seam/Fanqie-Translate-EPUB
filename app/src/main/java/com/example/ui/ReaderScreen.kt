@@ -497,6 +497,7 @@ fun ReaderScreen(
                                             }
                                         }
                                         ttsState == TtsState.INITIALIZING -> "Connecting speech engine..."
+                                        ttsState == TtsState.RECOVERING -> ttsErrorMessage ?: "Recovering speech engine..."
                                         ttsState == TtsState.PLAYING -> "Reading paragraph ${currentTtsParaIndex + 1} of ${paragraphs.size}"
                                         ttsState == TtsState.PAUSED -> "Paused at paragraph ${currentTtsParaIndex + 1} of ${paragraphs.size}"
                                         ttsState == TtsState.STOPPED -> "Stopped"
@@ -507,7 +508,7 @@ fun ReaderScreen(
                                     val statusColor = when {
                                         !isTtsEnabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                                         ttsState == TtsState.PLAYING -> MaterialTheme.colorScheme.primary
-                                        ttsState == TtsState.PAUSED -> MaterialTheme.colorScheme.tertiary
+                                        ttsState == TtsState.PAUSED || ttsState == TtsState.RECOVERING -> MaterialTheme.colorScheme.tertiary
                                         ttsState == TtsState.ERROR -> MaterialTheme.colorScheme.error
                                         else -> MaterialTheme.colorScheme.onSurfaceVariant
                                     }
@@ -572,7 +573,7 @@ fun ReaderScreen(
 
                                     IconButton(
                                         onClick = { showVoiceSelectionSheet = true },
-                                        enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING,
+                                        enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && ttsState != TtsState.RECOVERING,
                                         modifier = Modifier
                                             .size(40.dp)
                                             .testTag("reader_tts_voice_button")
@@ -604,7 +605,7 @@ fun ReaderScreen(
                                     Box {
                                         FilledTonalButton(
                                             onClick = { showSpeedMenu = true },
-                                            enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING,
+                                            enabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && ttsState != TtsState.RECOVERING,
                                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                             modifier = Modifier
                                                 .height(36.dp)
@@ -662,7 +663,7 @@ fun ReaderScreen(
                                 // 1. Previous Paragraph
                                 IconButton(
                                     onClick = { ttsManager.previousParagraph() },
-                                    enabled = isTtsEnabled && isCurrentChapterActiveInTts && ttsState != TtsState.INITIALIZING && currentTtsParaIndex > 0 && paragraphs.isNotEmpty(),
+                                    enabled = isTtsEnabled && isCurrentChapterActiveInTts && ttsState != TtsState.INITIALIZING && ttsState != TtsState.RECOVERING && currentTtsParaIndex > 0 && paragraphs.isNotEmpty(),
                                     modifier = Modifier.testTag("reader_tts_prev_para_button")
                                 ) {
                                     Icon(
@@ -675,7 +676,7 @@ fun ReaderScreen(
                                 Spacer(modifier = Modifier.width(12.dp))
 
                                 // 2. Play / Resume Button
-                                val isPlayOrResumeEnabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && paragraphs.isNotEmpty() && (!isCurrentChapterActiveInTts || ttsState != TtsState.PLAYING)
+                                val isPlayOrResumeEnabled = isTtsEnabled && ttsState != TtsState.INITIALIZING && ttsState != TtsState.RECOVERING && paragraphs.isNotEmpty() && (!isCurrentChapterActiveInTts || ttsState != TtsState.PLAYING)
 
                                 FilledIconButton(
                                     onClick = {
@@ -755,7 +756,7 @@ fun ReaderScreen(
                                 // 5. Next Paragraph
                                 IconButton(
                                     onClick = { ttsManager.nextParagraph() },
-                                    enabled = isTtsEnabled && isCurrentChapterActiveInTts && ttsState != TtsState.INITIALIZING && currentTtsParaIndex < paragraphs.size - 1 && paragraphs.isNotEmpty(),
+                                    enabled = isTtsEnabled && isCurrentChapterActiveInTts && ttsState != TtsState.INITIALIZING && ttsState != TtsState.RECOVERING && currentTtsParaIndex < paragraphs.size - 1 && paragraphs.isNotEmpty(),
                                     modifier = Modifier.testTag("reader_tts_next_para_button")
                                 ) {
                                     Icon(

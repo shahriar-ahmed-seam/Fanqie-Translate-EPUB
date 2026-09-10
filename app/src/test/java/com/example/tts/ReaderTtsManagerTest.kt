@@ -304,9 +304,9 @@ class ReaderTtsManagerTest {
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Test paragraph"))
 
-        // Should transition to ERROR instead of throwing or crashing
+        // Should transition to RECOVERING/ERROR instead of throwing or crashing
         manager.play()
-        assertEquals(TtsState.ERROR, manager.ttsState.value)
+        assertTrue(manager.ttsState.value == TtsState.RECOVERING || manager.ttsState.value == TtsState.ERROR)
         assertNotNull(manager.errorMessage.value)
     }
 
@@ -1243,7 +1243,7 @@ class ReaderTtsManagerTest {
 
         // First failure -> triggers attempt 1
         manager.play()
-        assertEquals(TtsState.ERROR, manager.ttsState.value)
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
         testScheduler.advanceUntilIdle()
 
         // Advance reinit 1 -> onInit -> speak fails again
@@ -1276,6 +1276,16 @@ class ReaderTtsManagerTest {
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Para 0", "Para 1"))
         manager.play()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+
+        // Exhaust retries to reach ERROR state
+        testScheduler.advanceUntilIdle()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
         assertEquals(TtsState.ERROR, manager.ttsState.value)
 
         // Engine heals
@@ -1283,7 +1293,7 @@ class ReaderTtsManagerTest {
 
         // User or UI calls recoverFromError
         manager.recoverFromError(resumePlaying = true, startIndex = 0)
-        assertEquals(TtsState.INITIALIZING, manager.ttsState.value)
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
 
         // Native engine becomes ready
         manager.onInit(TextToSpeech.SUCCESS)
@@ -1307,6 +1317,16 @@ class ReaderTtsManagerTest {
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Para 0", "Para 1"))
         manager.play()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+
+        // Exhaust retries to reach ERROR state
+        testScheduler.advanceUntilIdle()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
         assertEquals(TtsState.ERROR, manager.ttsState.value)
 
         // Engine heals
@@ -1314,7 +1334,7 @@ class ReaderTtsManagerTest {
 
         // Tapping play while in ERROR state automatically initiates recovery
         manager.play(startIndex = 1)
-        assertEquals(TtsState.INITIALIZING, manager.ttsState.value)
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
 
         manager.onInit(TextToSpeech.SUCCESS)
         testScheduler.advanceUntilIdle()
@@ -1535,6 +1555,210 @@ class ReaderTtsManagerTest {
         assertEquals(0, session?.paragraphIndex)
         assertTrue(session?.wasActivelyPlaying == true)
     }
+
+    @Test
+    fun testEngineFailureWithServiceErrorTriggersRecoveringAndRecreation() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        assertEquals(1, createCount)
+        assertTrue(manager.isEngineReady())
+
+        // Start playback
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_recover",
+            newParagraphs = listOf("Paragraph 1", "Paragraph 2"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_recover"
+        )
+        testScheduler.advanceUntilIdle()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        val initialClient = activeClient
+        assertNotNull(initialClient)
+
+        // Simulate native TTS service death (ERROR_SERVICE)
+        val activeUttId = initialClient?.lastUtteranceId
+        assertNotNull(activeUttId)
+        initialClient?.listener?.onError(activeUttId, TextToSpeech.ERROR_SERVICE)
+        testScheduler.runCurrent()
+
+        // Broken engine was shut down immediately and state moved to RECOVERING
+        assertTrue(initialClient?.isShutdown == true)
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+        assertFalse(manager.isEngineReady())
+
+        // Advance time through exponential backoff
+        testScheduler.advanceTimeBy(1000L)
+        testScheduler.runCurrent()
+
+        // New engine instantiated
+        assertEquals(2, createCount)
+        assertNotSame(initialClient, activeClient)
+
+        // Complete initialization of the new engine
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        // State resumed to PLAYING automatically from preserved position
+        assertTrue(manager.isEngineReady())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals("Paragraph 1", activeClient?.spokenTexts?.last())
+    }
+
+    @Test
+    fun testInitGateBlocksBlindSpeak() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        // Note: onInit NOT called yet!
+        assertFalse(manager.isEngineReady())
+        assertEquals(TtsState.INITIALIZING, manager.ttsState.value)
+
+        // Attempt to play before initialization gate opens
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_gate",
+            newParagraphs = listOf("Gate Paragraph"),
+            continuePlaying = false,
+            startIndex = 0
+        )
+        manager.play()
+        testScheduler.advanceUntilIdle()
+
+        // Speak must NOT be called on unready engine
+        assertTrue(fakeClient.spokenTexts.isEmpty())
+
+        // Now open the initialization gate
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        // Speech starts cleanly once the gate opened
+        assertTrue(manager.isEngineReady())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals("Gate Paragraph", fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testPauseDuringRecoveryPreservesPausedStateWithoutAutoplay() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_pause_rec",
+            newParagraphs = listOf("Para 1", "Para 2"),
+            continuePlaying = true,
+            startIndex = 1,
+            bookId = "book_pause_rec"
+        )
+        testScheduler.advanceUntilIdle()
+
+        // Trigger failure
+        val firstClient = activeClient
+        firstClient?.listener?.onError(firstClient.lastUtteranceId, TextToSpeech.ERROR_SERVICE)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+
+        // User explicitly presses Pause while recovering
+        manager.pause()
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+
+        // Complete backoff and recreate engine
+        testScheduler.advanceTimeBy(1000L)
+        testScheduler.runCurrent()
+        assertEquals(2, createCount)
+
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        // Engine is ready, but playback remains PAUSED without auto-speaking!
+        assertTrue(manager.isEngineReady())
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertTrue(activeClient?.spokenTexts?.isEmpty() == true)
+    }
+
+    @Test
+    fun testRepeatedFailuresExhaustRetriesAndEnterErrorState() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient().apply {
+            returnFailureOnSpeak = true
+        }
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_fail_limit",
+            newParagraphs = listOf("Fail Para 1"),
+            continuePlaying = false,
+            startIndex = 0,
+            bookId = "book_fail_limit"
+        )
+
+        // Attempt 1 fails
+        manager.play()
+        testScheduler.runCurrent()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+
+        // Advance through retry 1
+        testScheduler.advanceTimeBy(600L)
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.runCurrent()
+
+        // Attempt 2 fails
+        testScheduler.advanceTimeBy(1600L)
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.runCurrent()
+
+        // Attempt 3 fails
+        testScheduler.advanceTimeBy(3200L)
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.runCurrent()
+
+        // Exhausted bounded retries -> enters ERROR state
+        assertEquals(TtsState.ERROR, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+
+        // Test recoverFromError() recovers without clearing data
+        fakeClient.returnFailureOnSpeak = false
+        manager.recoverFromError(resumePlaying = true)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals("Fail Para 1", fakeClient.spokenTexts.last())
+    }
 }
+
 
 

@@ -204,6 +204,8 @@ class TtsPlaybackService : Service() {
         when (ttsManager.ttsState.value) {
             TtsState.PAUSED -> ttsManager.resume()
             TtsState.PLAYING -> { /* Already playing */ }
+            TtsState.RECOVERING -> { /* Recovery already in progress */ }
+            TtsState.ERROR -> ttsManager.recoverFromError(resumePlaying = true)
             else -> {
                 if (ttsManager.getParagraphs().isNotEmpty()) {
                     ttsManager.play(startIndex = ttsManager.currentParagraphIndex.value)
@@ -526,6 +528,7 @@ class TtsPlaybackService : Service() {
             TtsState.PLAYING -> PlaybackStateCompat.STATE_PLAYING
             TtsState.PAUSED -> PlaybackStateCompat.STATE_PAUSED
             TtsState.STOPPED -> PlaybackStateCompat.STATE_STOPPED
+            TtsState.RECOVERING, TtsState.INITIALIZING -> PlaybackStateCompat.STATE_BUFFERING
             else -> PlaybackStateCompat.STATE_NONE
         }
 
@@ -578,6 +581,7 @@ class TtsPlaybackService : Service() {
         chapterId: String
     ): Notification {
         val isPlaying = state == TtsState.PLAYING
+        val isRecovering = state == TtsState.RECOVERING
 
         // Content intent: open reader in MainActivity
         val contentIntent = Intent(this, MainActivity::class.java).apply {
@@ -635,10 +639,10 @@ class TtsPlaybackService : Service() {
         }
         val playPauseText = if (isPlaying) "Pause" else "Resume"
 
-        val subText = if (totalParagraphs > 0) {
-            "Paragraph ${paragraphIndex + 1} of $totalParagraphs"
-        } else {
-            "Audiobook"
+        val subText = when {
+            isRecovering -> "Recovering speech engine..."
+            totalParagraphs > 0 -> "Paragraph ${paragraphIndex + 1} of $totalParagraphs"
+            else -> "Audiobook"
         }
 
         val mediaStyle = androidx.media.app.NotificationCompat.MediaStyle()
@@ -654,7 +658,7 @@ class TtsPlaybackService : Service() {
             .setDeleteIntent(stopPendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-            .setOngoing(isPlaying)
+            .setOngoing(isPlaying || isRecovering)
             .setSilent(true)
             .addAction(android.R.drawable.ic_media_previous, "Previous", prevPendingIntent)
             .addAction(playPauseIcon, playPauseText, playPausePendingIntent)
