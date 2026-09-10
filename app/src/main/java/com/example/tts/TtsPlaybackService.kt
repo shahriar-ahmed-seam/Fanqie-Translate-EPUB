@@ -48,7 +48,7 @@ class TtsPlaybackService : Service() {
     private val isRestoringSession = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private val wakeLockSync = Any()
-    private val WAKELOCK_TIMEOUT_MS = 30 * 60 * 1000L // 30 minutes safely renewable timeout
+    private val WAKELOCK_TIMEOUT_MS = 10 * 60 * 1000L // 10 minutes safely renewable timeout
 
     /**
      * Centralized WakeLock management:

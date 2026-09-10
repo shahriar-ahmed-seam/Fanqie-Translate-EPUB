@@ -1,6 +1,7 @@
 package com.example.tts
 
 import android.content.Context
+import android.media.AudioManager
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -1757,6 +1758,151 @@ class ReaderTtsManagerTest {
 
         assertEquals(TtsState.PLAYING, manager.ttsState.value)
         assertEquals("Fail Para 1", fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testPhoneCallTransientLossPausesAndRegainResumes() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_call",
+            newParagraphs = listOf("Paragraph 0", "Paragraph 1"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_call"
+        )
+        testScheduler.advanceUntilIdle()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+
+        // Incoming phone call triggers transient audio focus loss
+        manager.audioFocusManager.handleAudioFocusChangeForTesting(AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+        testScheduler.runCurrent()
+
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertTrue(manager.audioFocusManager.pausedDueToTransientLoss)
+
+        // Phone call ends -> AUDIOFOCUS_GAIN
+        manager.audioFocusManager.handleAudioFocusChangeForTesting(AudioManager.AUDIOFOCUS_GAIN)
+        testScheduler.advanceUntilIdle()
+
+        // Automatically resumed
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertFalse(manager.audioFocusManager.pausedDueToTransientLoss)
+    }
+
+    @Test
+    fun testUserPauseDuringPhoneCallPreventsAutoResume() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_user_pause",
+            newParagraphs = listOf("Paragraph 0", "Paragraph 1"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_user_pause"
+        )
+        testScheduler.advanceUntilIdle()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Incoming call causes transient loss
+        manager.audioFocusManager.handleAudioFocusChangeForTesting(AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+        assertTrue(manager.audioFocusManager.pausedDueToTransientLoss)
+
+        // User explicitly taps Pause while on the call
+        manager.pause(isExplicitUserAction = true)
+        testScheduler.runCurrent()
+        assertFalse(manager.audioFocusManager.pausedDueToTransientLoss)
+
+        // Phone call ends -> AUDIOFOCUS_GAIN
+        manager.audioFocusManager.handleAudioFocusChangeForTesting(AudioManager.AUDIOFOCUS_GAIN)
+        testScheduler.advanceUntilIdle()
+
+        // MUST stay paused because user explicitly paused!
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+    }
+
+    @Test
+    fun testPermanentAudioFocusLossPausesAndAbandonsFocusWithoutAutoResume() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_perm_loss",
+            newParagraphs = listOf("Paragraph 0", "Paragraph 1"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_perm_loss"
+        )
+        testScheduler.advanceUntilIdle()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Spotify or YouTube starts -> AUDIOFOCUS_LOSS
+        manager.audioFocusManager.handleAudioFocusChangeForTesting(AudioManager.AUDIOFOCUS_LOSS)
+        testScheduler.runCurrent()
+
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+        assertFalse(manager.audioFocusManager.hasFocus)
+        assertFalse(manager.audioFocusManager.pausedDueToTransientLoss)
+
+        // Focus returns later -> must NOT auto-resume
+        manager.audioFocusManager.handleAudioFocusChangeForTesting(AudioManager.AUDIOFOCUS_GAIN)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+    }
+
+    @Test
+    fun testBecomingNoisyPausesPlaybackAndPreventsAutoResume() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_noisy",
+            newParagraphs = listOf("Paragraph 0", "Paragraph 1"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_noisy"
+        )
+        testScheduler.advanceUntilIdle()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // User unplugs wired headphones or disconnects Bluetooth
+        manager.audioFocusManager.simulateAudioBecomingNoisyForTesting()
+        testScheduler.runCurrent()
+
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+        assertFalse(manager.audioFocusManager.hasFocus)
+        assertFalse(manager.audioFocusManager.pausedDueToTransientLoss)
+
+        // Headphones reconnected -> focus gain must NOT auto-resume
+        manager.audioFocusManager.handleAudioFocusChangeForTesting(AudioManager.AUDIOFOCUS_GAIN)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
     }
 }
 

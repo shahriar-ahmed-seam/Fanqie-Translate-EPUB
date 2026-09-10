@@ -433,21 +433,41 @@ class ReaderTtsManager(
     val audioFocusManager: TtsAudioManager = TtsAudioManager(
         context = context.applicationContext,
         onAudioFocusLoss = {
-            pause()
+            handleAudioFocusLoss()
         },
         onAudioFocusTransientLoss = {
-            pause()
+            handleAudioFocusTransientLoss()
         },
         onAudioFocusGain = {
-            resume()
+            handleAudioFocusGain()
         },
-        onAudioFocusDuck = { duckRatio ->
-            currentVolume = duckRatio
-            if (_ttsState.value == TtsState.PLAYING) {
-                speakCurrentParagraph(currentSubChunkIndex)
-            }
+        onAudioFocusDuck = null, // Default to pausing for speech content so words are not missed or repeated
+        onAudioBecomingNoisy = {
+            handleAudioBecomingNoisy()
         }
     )
+
+    private fun handleAudioFocusLoss() {
+        Log.i(TAG, "Audio focus lost permanently. Pausing playback and preserving position.")
+        pause(isExplicitUserAction = false)
+    }
+
+    private fun handleAudioFocusTransientLoss() {
+        Log.i(TAG, "Audio focus lost transiently (e.g. phone call/alert). Pausing playback.")
+        pause(isExplicitUserAction = false)
+    }
+
+    private fun handleAudioFocusGain() {
+        Log.i(TAG, "Audio focus regained. State=${_ttsState.value}")
+        if (_ttsState.value == TtsState.PAUSED && _isTtsEnabled.value) {
+            resume()
+        }
+    }
+
+    private fun handleAudioBecomingNoisy() {
+        Log.i(TAG, "Audio route changed to noisy (headphones/Bluetooth unplugged). Pausing playback.")
+        pause(isExplicitUserAction = true)
+    }
 
     init {
         initializeEngine()
@@ -928,12 +948,16 @@ class ReaderTtsManager(
 
     /**
      * Pauses the current playback, retaining paragraph position.
+     * If isExplicitUserAction is true, clears transient loss so subsequent audio focus gain does not auto-resume.
      */
-    fun pause() {
+    fun pause(isExplicitUserAction: Boolean = true) {
         if (isReleased) return
         playbackSessionEpoch++
         isAdvancingChapter = false
         wasPlayingBeforeEngineReinit = false
+        if (isExplicitUserAction) {
+            audioFocusManager.clearTransientLoss()
+        }
         if (_ttsState.value == TtsState.PLAYING || _ttsState.value == TtsState.RECOVERING) {
             activeUtteranceId = null
             try {
@@ -947,7 +971,7 @@ class ReaderTtsManager(
                 TtsState.PAUSED,
                 subChunkIndex = currentSubChunkIndex,
                 wasActivelyPlaying = false,
-                interruptionReason = TtsInterruptionReason.EXPLICIT_PAUSE
+                interruptionReason = if (isExplicitUserAction) TtsInterruptionReason.EXPLICIT_PAUSE else TtsInterruptionReason.UNEXPECTED_INTERRUPTION
             )
         }
     }
@@ -1466,7 +1490,7 @@ class ReaderTtsManager(
         activeUtteranceId = null
         recoveryJob?.cancel()
         recoveryJob = null
-        audioFocusManager.abandonAudioFocus()
+        audioFocusManager.release()
         teardownBrokenEngine()
         _ttsState.value = TtsState.STOPPED
     }
