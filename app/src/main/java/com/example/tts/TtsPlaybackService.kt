@@ -19,14 +19,18 @@ import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.TranslatorApplication
+import com.example.data.repository.SettingsRepository
 import com.example.data.repository.TtsPlaybackSessionState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -41,6 +45,35 @@ class TtsPlaybackService : Service() {
     private var mediaSession: MediaSessionCompat? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var observationJob: Job? = null
+    private val isRestoringSession = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private val wakeLockSync = Any()
+    private val WAKELOCK_TIMEOUT_MS = 30 * 60 * 1000L // 30 minutes safely renewable timeout
+
+    /**
+     * Centralized WakeLock management:
+     * While actively playing, safely renews the timeout to prevent OEM killing or abandonment drain.
+     * When playback stops or pauses, immediately releases the WakeLock.
+     */
+    private fun manageWakeLock(shouldHold: Boolean) {
+        synchronized(wakeLockSync) {
+            val lock = wakeLock ?: return
+            try {
+                if (shouldHold) {
+                    // setReferenceCounted(false) ensures acquire(timeout) renews without stacking counts
+                    lock.acquire(WAKELOCK_TIMEOUT_MS)
+                    Log.d(TAG, "WakeLock acquired/renewed with ${WAKELOCK_TIMEOUT_MS / 60000}m timeout")
+                } else {
+                    if (lock.isHeld) {
+                        lock.release()
+                        Log.d(TAG, "WakeLock released")
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Error managing WakeLock (shouldHold=$shouldHold)", e)
+            }
+        }
+    }
 
     companion object {
         const val CHANNEL_ID = "epub_tts_channel"
@@ -183,7 +216,15 @@ class TtsPlaybackService : Service() {
         }
     }
 
-    private suspend fun restoreSessionIfPossible(app: TranslatorApplication, autoPlay: Boolean = false) {
+    private suspend fun restoreSessionIfPossible(
+        app: TranslatorApplication,
+        autoPlay: Boolean = false,
+        forcedSubChunk: Int? = null
+    ) {
+        if (!isRestoringSession.compareAndSet(false, true)) {
+            Log.d(TAG, "Session restoration already in progress; skipping duplicate request")
+            return
+        }
         try {
             val settingsRepo = app.settingsRepository
             val session = settingsRepo.getTtsSessionState() ?: return
@@ -202,19 +243,35 @@ class TtsPlaybackService : Service() {
             val novelTitle = book?.title ?: "Audiobook"
 
             val ttsManager = app.ttsManager
+            if (session.speechRate in 0.5f..2.5f) {
+                ttsManager.setSpeechRate(session.speechRate)
+            }
+            if (!session.voiceId.isNullOrBlank()) {
+                ttsManager.selectVoiceById(session.voiceId)
+            }
+
+            val subChunk = forcedSubChunk ?: session.subChunkIndex
+            val targetState = if (autoPlay) null else {
+                if (session.playbackState == "PAUSED") TtsState.PAUSED else TtsState.IDLE
+            }
+
             ttsManager.setChapterAndParagraphs(
                 chapterId = data.nextChapterId,
                 newParagraphs = data.paragraphs,
                 continuePlaying = autoPlay,
                 startIndex = session.paragraphIndex,
+                startSubChunk = subChunk,
                 bookId = session.bookId,
                 novelTitle = novelTitle,
                 chapterTitle = data.nextChapterTitle,
-                chapterOrder = data.nextChapterOrder
+                chapterOrder = data.nextChapterOrder,
+                targetState = targetState
             )
-            Log.i(TAG, "Restored TTS session for book ${session.bookId}, chapter ${session.chapterId}, para ${session.paragraphIndex}")
+            Log.i(TAG, "Restored TTS session for book ${session.bookId}, chapter ${session.chapterId}, para ${session.paragraphIndex}, subChunk $subChunk, autoPlay=$autoPlay, targetState=$targetState")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to restore TTS session from repository", e)
+        } finally {
+            isRestoringSession.set(false)
         }
     }
 
@@ -274,10 +331,27 @@ class TtsPlaybackService : Service() {
             null -> {
                 // Recover from process recreation (START_STICKY restarted service with null intent)
                 Log.i(TAG, "TtsPlaybackService restarted with null intent. Checking session recovery...")
-                if (ttsManager.getParagraphs().isEmpty()) {
+                val session = app.settingsRepository.getTtsSessionState()
+                if (session == null || session.interruptionReason == TtsInterruptionReason.EXPLICIT_STOP || session.playbackState == "STOPPED") {
+                    Log.i(TAG, "Session was explicitly stopped or absent. Stopping recreated service.")
+                    stopServiceSafely()
+                    return START_NOT_STICKY
+                }
+
+                val shouldResumePlayback = session.wasActivelyPlaying &&
+                    session.interruptionReason == TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+
+                if (shouldResumePlayback) {
+                    serviceScope.launch {
+                        restoreSessionIfPossible(app, autoPlay = true)
+                    }
+                } else if (session.playbackState == "PAUSED" || session.interruptionReason == TtsInterruptionReason.EXPLICIT_PAUSE) {
                     serviceScope.launch {
                         restoreSessionIfPossible(app, autoPlay = false)
                     }
+                } else {
+                    stopServiceSafely()
+                    return START_NOT_STICKY
                 }
             }
         }
@@ -298,14 +372,18 @@ class TtsPlaybackService : Service() {
             chapterId = ttsManager?.mediaMetadata?.value?.chapterId ?: ""
         )
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                initialNotification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, initialNotification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    initialNotification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, initialNotification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start service in foreground", e)
         }
     }
 
@@ -325,9 +403,18 @@ class TtsPlaybackService : Service() {
                         chapterId = meta.chapterId,
                         chapterOrder = meta.chapterOrder,
                         paragraphIndex = paraIndex,
+                        subChunkIndex = ttsManager.getCurrentSubChunkIndex(),
                         playbackState = state.name,
                         speechRate = ttsManager.speechRate.value,
-                        voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId
+                        voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId,
+                        timestamp = System.currentTimeMillis(),
+                        wasActivelyPlaying = (state == TtsState.PLAYING),
+                        interruptionReason = when (state) {
+                            TtsState.PLAYING -> TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                            TtsState.PAUSED -> TtsInterruptionReason.EXPLICIT_PAUSE
+                            TtsState.STOPPED -> TtsInterruptionReason.EXPLICIT_STOP
+                            else -> TtsInterruptionReason.NONE
+                        }
                     )
                 )
                 settingsRepo.setLastReadChapterId(meta.bookId, meta.chapterId)
@@ -337,72 +424,93 @@ class TtsPlaybackService : Service() {
 
         observationJob?.cancel()
         observationJob = serviceScope.launch {
-            combine(
-                ttsManager.ttsState,
-                ttsManager.currentParagraphIndex,
-                ttsManager.mediaMetadata
-            ) { state, paraIndex, meta ->
-                Triple(state, paraIndex, meta)
-            }.conflate().collect { (state, paraIndex, meta) ->
-                // Manage WakeLock
-                if (state == TtsState.PLAYING) {
-                    try {
-                        if (wakeLock?.isHeld == false) {
-                            wakeLock?.acquire()
-                            Log.d(TAG, "WakeLock acquired for playback")
+            var restartAttempts = 0
+            while (isActive && restartAttempts < 10) {
+                try {
+                    combine(
+                        ttsManager.ttsState,
+                        ttsManager.currentParagraphIndex,
+                        ttsManager.mediaMetadata
+                    ) { state, paraIndex, meta ->
+                        Triple(state, paraIndex, meta)
+                    }.conflate().collect { (state, paraIndex, meta) ->
+                        try {
+                            handleObservedState(state, paraIndex, meta, ttsManager, settingsRepo)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "Error handling observed TTS state change ($state, para $paraIndex)", e)
                         }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "WakeLock acquire error", e)
                     }
-                } else {
-                    try {
-                        if (wakeLock?.isHeld == true) {
-                            wakeLock?.release()
-                            Log.d(TAG, "WakeLock released")
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "WakeLock release error", e)
-                    }
-                }
-
-                // Update MediaSession PlaybackState and Metadata
-                updateMediaSessionState(state, paraIndex, meta, ttsManager.getParagraphs().size)
-
-                // Update Foreground Notification
-                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                if (notificationManager != null) {
-                    val notification = buildNotification(
-                        novelTitle = meta.novelTitle.ifBlank { "Audiobook Playback" },
-                        chapterTitle = meta.chapterTitle.ifBlank { "EPUB Reader" },
-                        paragraphIndex = paraIndex,
-                        totalParagraphs = ttsManager.getParagraphs().size,
-                        state = state,
-                        bookId = meta.bookId,
-                        chapterId = meta.chapterId
-                    )
-                    notificationManager.notify(NOTIFICATION_ID, notification)
-                }
-
-                // Persist state
-                if (meta.bookId.isNotBlank() && meta.chapterId.isNotBlank()) {
-                    settingsRepo.saveTtsSessionState(
-                        TtsPlaybackSessionState(
-                            bookId = meta.bookId,
-                            chapterId = meta.chapterId,
-                            chapterOrder = meta.chapterOrder,
-                            paragraphIndex = paraIndex,
-                            playbackState = state.name,
-                            speechRate = ttsManager.speechRate.value,
-                            voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId
-                        )
-                    )
-                }
-
-                // If playback was explicitly stopped or ended, stop foreground service safely
-                if (state == TtsState.STOPPED) {
-                    stopServiceSafely()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    restartAttempts++
+                    Log.e(TAG, "Exception in observeTtsManager collection (attempt $restartAttempts/10)", e)
+                    delay(1000L)
                 }
             }
+        }
+    }
+
+    private fun handleObservedState(
+        state: TtsState,
+        paraIndex: Int,
+        meta: TtsMediaMetadata,
+        ttsManager: ReaderTtsManager,
+        settingsRepo: SettingsRepository
+    ) {
+        // Manage WakeLock (safely renewable while PLAYING, released otherwise)
+        manageWakeLock(state == TtsState.PLAYING)
+
+        // Update MediaSession PlaybackState and Metadata
+        try {
+            updateMediaSessionState(state, paraIndex, meta, ttsManager.getParagraphs().size)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to update media session state", e)
+        }
+
+        // Update Foreground Notification
+        try {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            if (notificationManager != null) {
+                val notification = buildNotification(
+                    novelTitle = meta.novelTitle.ifBlank { "Audiobook Playback" },
+                    chapterTitle = meta.chapterTitle.ifBlank { "EPUB Reader" },
+                    paragraphIndex = paraIndex,
+                    totalParagraphs = ttsManager.getParagraphs().size,
+                    state = state,
+                    bookId = meta.bookId,
+                    chapterId = meta.chapterId
+                )
+                notificationManager.notify(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to update notification", e)
+        }
+
+        // Persist state
+        try {
+            if (meta.bookId.isNotBlank() && meta.chapterId.isNotBlank()) {
+                settingsRepo.saveTtsSessionState(
+                    TtsPlaybackSessionState(
+                        bookId = meta.bookId,
+                        chapterId = meta.chapterId,
+                        chapterOrder = meta.chapterOrder,
+                        paragraphIndex = paraIndex,
+                        playbackState = state.name,
+                        speechRate = ttsManager.speechRate.value,
+                        voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId
+                    )
+                )
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to persist TTS session state from service", e)
+        }
+
+        // If playback was explicitly stopped or ended, stop foreground service safely
+        if (state == TtsState.STOPPED) {
+            stopServiceSafely()
         }
     }
 
@@ -545,6 +653,7 @@ class TtsPlaybackService : Service() {
             .setContentIntent(contentPendingIntent)
             .setDeleteIntent(stopPendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setOngoing(isPlaying)
             .setSilent(true)
             .addAction(android.R.drawable.ic_media_previous, "Previous", prevPendingIntent)
@@ -555,19 +664,17 @@ class TtsPlaybackService : Service() {
     }
 
     private fun stopServiceSafely() {
+        manageWakeLock(false)
+
         try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Error releasing wake lock on stop", e)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
+            Log.w(TAG, "Error stopping foreground", e)
         }
         stopSelf()
     }
@@ -576,24 +683,19 @@ class TtsPlaybackService : Service() {
 
     override fun onDestroy() {
         observationJob?.cancel()
+        observationJob = null
         serviceScope.cancel()
 
-        val app = applicationContext as? TranslatorApplication
-        app?.ttsManager?.let { tm ->
-            tm.onPositionChanged = null
-        }
+        manageWakeLock(false)
 
         try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
+            mediaSession?.isActive = false
+            mediaSession?.release()
         } catch (e: Exception) {
-            Log.w(TAG, "Error releasing wake lock on destroy", e)
+            Log.w(TAG, "Error releasing MediaSession on service destroy", e)
+        } finally {
+            mediaSession = null
         }
-
-        mediaSession?.isActive = false
-        mediaSession?.release()
-        mediaSession = null
 
         super.onDestroy()
     }

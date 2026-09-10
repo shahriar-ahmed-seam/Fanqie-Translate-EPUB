@@ -110,4 +110,85 @@ class TtsPersistenceTest {
         settingsRepository.clearTtsSessionState()
         assertNull(settingsRepository.getTtsSessionState())
     }
+
+    @Test
+    fun testCheckpointRestorationPreservesChapterParagraphAndSubchunk() {
+        val checkpoint = TtsPlaybackSessionState(
+            bookId = "novel_42",
+            chapterId = "chap_99",
+            chapterOrder = 12,
+            paragraphIndex = 37,
+            subChunkIndex = 3,
+            playbackState = "PLAYING",
+            speechRate = 1.15f,
+            voiceId = "en-us-premium",
+            timestamp = 1726000000000L,
+            wasActivelyPlaying = true,
+            interruptionReason = "UNEXPECTED_INTERRUPTION"
+        )
+        settingsRepository.saveTtsSessionState(checkpoint)
+
+        val restored = settingsRepository.getTtsSessionState()
+        assertNotNull(restored)
+        assertEquals("novel_42", restored?.bookId)
+        assertEquals("chap_99", restored?.chapterId)
+        assertEquals(12, restored?.chapterOrder)
+        assertEquals(37, restored?.paragraphIndex)
+        assertEquals(3, restored?.subChunkIndex)
+        assertEquals("PLAYING", restored?.playbackState)
+        assertEquals(1.15f, restored?.speechRate ?: 1.0f, 0.01f)
+        assertEquals("en-us-premium", restored?.voiceId)
+        assertEquals(1726000000000L, restored?.timestamp)
+        assertTrue(restored?.wasActivelyPlaying == true)
+        assertEquals("UNEXPECTED_INTERRUPTION", restored?.interruptionReason)
+    }
+
+    @Test
+    fun testInterruptionReasonDistinction() {
+        // Explicit pause
+        val pauseCheckpoint = TtsPlaybackSessionState(
+            bookId = "book_1",
+            chapterId = "chap_1",
+            paragraphIndex = 5,
+            subChunkIndex = 1,
+            playbackState = "PAUSED",
+            wasActivelyPlaying = false,
+            interruptionReason = "EXPLICIT_PAUSE"
+        )
+        settingsRepository.saveTtsSessionState(pauseCheckpoint)
+        val restoredPause = settingsRepository.getTtsSessionState()
+        assertFalse(restoredPause?.wasActivelyPlaying ?: true)
+        assertEquals("EXPLICIT_PAUSE", restoredPause?.interruptionReason)
+
+        // Explicit stop
+        val stopCheckpoint = TtsPlaybackSessionState(
+            bookId = "book_1",
+            chapterId = "chap_1",
+            paragraphIndex = 5,
+            subChunkIndex = 0,
+            playbackState = "STOPPED",
+            wasActivelyPlaying = false,
+            interruptionReason = "EXPLICIT_STOP"
+        )
+        settingsRepository.saveTtsSessionState(stopCheckpoint)
+        val restoredStop = settingsRepository.getTtsSessionState()
+        assertFalse(restoredStop?.wasActivelyPlaying ?: true)
+        assertEquals("EXPLICIT_STOP", restoredStop?.interruptionReason)
+
+        // Unexpected interruption
+        val crashCheckpoint = TtsPlaybackSessionState(
+            bookId = "book_1",
+            chapterId = "chap_1",
+            paragraphIndex = 5,
+            subChunkIndex = 2,
+            playbackState = "PLAYING",
+            wasActivelyPlaying = true,
+            interruptionReason = "UNEXPECTED_INTERRUPTION"
+        )
+        settingsRepository.saveTtsSessionState(crashCheckpoint)
+        val restoredCrash = settingsRepository.getTtsSessionState()
+        assertTrue(restoredCrash?.wasActivelyPlaying ?: false)
+        assertEquals("UNEXPECTED_INTERRUPTION", restoredCrash?.interruptionReason)
+    }
 }
+

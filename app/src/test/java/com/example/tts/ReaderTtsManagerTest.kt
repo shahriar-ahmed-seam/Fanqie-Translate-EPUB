@@ -21,6 +21,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.Locale
+import com.example.data.repository.SettingsRepository
 import com.example.tts.rule.TtsRule
 import com.example.tts.rule.TtsRuleType
 import com.example.tts.rule.TtsTextProcessor
@@ -1226,5 +1227,314 @@ class ReaderTtsManagerTest {
         assertEquals(TtsState.PLAYING, manager.ttsState.value)
         assertEquals(0, manager.currentParagraphIndex.value)
     }
+
+    @Test
+    fun testBoundedEngineReinitializationRetryLimit() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient().apply {
+            returnFailureOnSpeak = true
+        }
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setParagraphs(listOf("Para 0", "Para 1"))
+
+        // First failure -> triggers attempt 1
+        manager.play()
+        assertEquals(TtsState.ERROR, manager.ttsState.value)
+        testScheduler.advanceUntilIdle()
+
+        // Advance reinit 1 -> onInit -> speak fails again
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        // Reinit 2 -> onInit -> speak fails again
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        // Reinit 3 -> onInit -> speak fails again
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        // Exhausted max 3 retries -> stays in ERROR with retry message, no infinite loop
+        assertEquals(TtsState.ERROR, manager.ttsState.value)
+        assertTrue(manager.errorMessage.value?.contains("Tap Play to retry") == true)
+    }
+
+    @Test
+    fun testRecoverFromErrorRecoversTtsStateAndResumesPlayback() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient().apply {
+            returnFailureOnSpeak = true
+        }
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setParagraphs(listOf("Para 0", "Para 1"))
+        manager.play()
+        assertEquals(TtsState.ERROR, manager.ttsState.value)
+
+        // Engine heals
+        fakeClient.returnFailureOnSpeak = false
+
+        // User or UI calls recoverFromError
+        manager.recoverFromError(resumePlaying = true, startIndex = 0)
+        assertEquals(TtsState.INITIALIZING, manager.ttsState.value)
+
+        // Native engine becomes ready
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals("Para 0", fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testPlayInErrorStateTriggersAutomaticRecovery() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient().apply {
+            returnFailureOnSpeak = true
+        }
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setParagraphs(listOf("Para 0", "Para 1"))
+        manager.play()
+        assertEquals(TtsState.ERROR, manager.ttsState.value)
+
+        // Engine heals
+        fakeClient.returnFailureOnSpeak = false
+
+        // Tapping play while in ERROR state automatically initiates recovery
+        manager.play(startIndex = 1)
+        assertEquals(TtsState.INITIALIZING, manager.ttsState.value)
+
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals(1, manager.currentParagraphIndex.value)
+        assertEquals("Para 1", fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testIntrinsicPositionPersistenceWithoutOnPositionChangedCallback() {
+        val repo = SettingsRepository(context)
+        repo.clearTtsSessionState()
+
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = testScope,
+            clientFactory = { fakeClient },
+            settingsRepository = repo
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        // Ensure onPositionChanged is null
+        manager.onPositionChanged = null
+
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_int_1",
+            newParagraphs = listOf("Para 0", "Para 1", "Para 2"),
+            continuePlaying = false,
+            startIndex = 0,
+            bookId = "book_int_1"
+        )
+
+        // Play paragraph 0
+        manager.play(0)
+        assertEquals(0, repo.getLastReadParagraphIndex("book_int_1", "chap_int_1"))
+        assertEquals("chap_int_1", repo.getLastReadChapterId("book_int_1"))
+
+        // Advance to next paragraph
+        manager.nextParagraph()
+        assertEquals(1, repo.getLastReadParagraphIndex("book_int_1", "chap_int_1"))
+        val session = repo.getTtsSessionState()
+        assertNotNull(session)
+        assertEquals(1, session?.paragraphIndex)
+        assertEquals("book_int_1", session?.bookId)
+        assertEquals("chap_int_1", session?.chapterId)
+    }
+
+    @Test
+    fun testChapterTransitionExceptionDoesNotCancelScopeOrCrash() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Faulty transition provider that throws RuntimeException (e.g. SQLite error)
+        manager.chapterTransitionProvider = object : ChapterTransitionProvider {
+            override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? {
+                throw java.lang.IllegalStateException("Simulated SQLite disk corruption")
+            }
+            override suspend fun getPreviousChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? = null
+        }
+
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_1",
+            newParagraphs = listOf("Single paragraph"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+
+        // Complete the single paragraph -> triggers handleChapterEnd -> throws inside launchSafe
+        val uttId = fakeClient.lastUtteranceId
+        fakeClient.listener?.onDone(uttId)
+        testScheduler.advanceUntilIdle()
+
+        // Playback stops gracefully instead of crashing
+        assertEquals(TtsState.STOPPED, manager.ttsState.value)
+
+        // Verify scope is STILL active and can play new chapter
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_2",
+            newParagraphs = listOf("New chapter paragraph"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertEquals("New chapter paragraph", fakeClient.spokenTexts.last())
+    }
+
+    @Test
+    fun testStaleCallbackFromOlderEngineGenerationIsIgnored() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        val initialGen = manager.getEngineGeneration()
+
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_1",
+            newParagraphs = listOf("Paragraph 0", "Paragraph 1"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_1"
+        )
+        val oldUtteranceId = fakeClient.lastUtteranceId
+        assertNotNull(oldUtteranceId)
+        assertTrue(oldUtteranceId!!.startsWith("utt_g${initialGen}_"))
+
+        // Reinitialize engine -> engineGeneration increments
+        val newFakeClient = FakeTtsClient()
+        manager.reinitialize(resumeOnReady = false)
+        manager.onInit(TextToSpeech.SUCCESS)
+        assertTrue(manager.getEngineGeneration() > initialGen)
+
+        // Stale callback from old engine generation arrives
+        fakeClient.listener?.onDone(oldUtteranceId)
+        testScheduler.advanceUntilIdle()
+
+        // Verify it was ignored: paragraph was NOT advanced
+        assertEquals(0, manager.currentParagraphIndex.value)
+    }
+
+    @Test
+    fun testExplicitPauseAndStopPersistCorrectReasonAndFlags() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val repo = SettingsRepository(context)
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient },
+            settingsRepository = repo
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_reason_1",
+            newParagraphs = listOf("First paragraph", "Second paragraph"),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_reason_1"
+        )
+        testScheduler.advanceUntilIdle()
+
+        // Actively playing -> UNEXPECTED_INTERRUPTION and wasActivelyPlaying = true
+        var session = repo.getTtsSessionState()
+        assertNotNull(session)
+        assertTrue(session?.wasActivelyPlaying == true)
+        assertEquals(TtsInterruptionReason.UNEXPECTED_INTERRUPTION, session?.interruptionReason)
+        assertEquals("PLAYING", session?.playbackState)
+
+        // User explicitly pauses
+        manager.pause()
+        session = repo.getTtsSessionState()
+        assertNotNull(session)
+        assertFalse(session?.wasActivelyPlaying ?: true)
+        assertEquals(TtsInterruptionReason.EXPLICIT_PAUSE, session?.interruptionReason)
+        assertEquals("PAUSED", session?.playbackState)
+
+        // User resumes
+        manager.resume()
+        session = repo.getTtsSessionState()
+        assertNotNull(session)
+        assertTrue(session?.wasActivelyPlaying ?: false)
+        assertEquals(TtsInterruptionReason.UNEXPECTED_INTERRUPTION, session?.interruptionReason)
+        assertEquals("PLAYING", session?.playbackState)
+
+        // User explicitly stops
+        manager.stop()
+        session = repo.getTtsSessionState()
+        assertNotNull(session)
+        assertFalse(session?.wasActivelyPlaying ?: true)
+        assertEquals(TtsInterruptionReason.EXPLICIT_STOP, session?.interruptionReason)
+        assertEquals("STOPPED", session?.playbackState)
+    }
+
+    @Test
+    fun testSubchunkRestorationPreservesExactSubchunk() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val repo = SettingsRepository(context)
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient },
+            settingsRepository = repo
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Create a long paragraph that chunks into at least 2 subchunks
+        val part1 = "A".repeat(2400) + ". "
+        val part2 = "B".repeat(1000)
+        val longParagraph = part1 + part2
+
+        // Set chapter with long paragraph and start playing from subchunk 1
+        manager.setChapterAndParagraphs(
+            chapterId = "chap_sub_1",
+            newParagraphs = listOf(longParagraph),
+            continuePlaying = true,
+            startIndex = 0,
+            startSubChunk = 1,
+            bookId = "book_sub_1"
+        )
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, manager.getCurrentSubChunkIndex())
+        assertEquals(part2, fakeClient.spokenTexts.last())
+
+        val session = repo.getTtsSessionState()
+        assertNotNull(session)
+        assertEquals(1, session?.subChunkIndex)
+        assertEquals(0, session?.paragraphIndex)
+        assertTrue(session?.wasActivelyPlaying == true)
+    }
 }
+
 

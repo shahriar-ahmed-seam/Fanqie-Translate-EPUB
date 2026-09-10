@@ -6,11 +6,17 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
+import com.example.data.repository.SettingsRepository
+import com.example.data.repository.TtsPlaybackSessionState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -24,6 +30,17 @@ enum class TtsState {
     PAUSED,
     STOPPED,
     ERROR
+}
+
+/**
+ * Interruption and termination reasons to clearly distinguish user actions from unexpected crashes.
+ */
+object TtsInterruptionReason {
+    const val NONE = "NONE"
+    const val EXPLICIT_PAUSE = "EXPLICIT_PAUSE"
+    const val EXPLICIT_STOP = "EXPLICIT_STOP"
+    const val NATURALLY_FINISHED = "NATURALLY_FINISHED"
+    const val UNEXPECTED_INTERRUPTION = "UNEXPECTED_INTERRUPTION"
 }
 
 /**
@@ -114,13 +131,165 @@ class AndroidTextToSpeechClient(
  */
 class ReaderTtsManager(
     private val context: Context,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main),
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
     private val clientFactory: ((TextToSpeech.OnInitListener) -> TextToSpeechClient?)? = null,
     val textProcessor: com.example.tts.rule.TtsTextProcessor =
-        (context.applicationContext as? com.example.TranslatorApplication)?.ttsTextProcessor ?: com.example.tts.rule.TtsTextProcessor()
+        (context.applicationContext as? com.example.TranslatorApplication)?.ttsTextProcessor ?: com.example.tts.rule.TtsTextProcessor(),
+    private val settingsRepository: SettingsRepository? =
+        (context.applicationContext as? com.example.TranslatorApplication)?.settingsRepository
+            ?: runCatching { SettingsRepository(context.applicationContext) }.getOrNull()
 ) : TextToSpeech.OnInitListener {
 
     private val TAG = "ReaderTtsManager"
+
+    @Volatile
+    private var managerScope: CoroutineScope = scope
+
+    private fun getSafeScope(): CoroutineScope {
+        val current = managerScope
+        if (current.isActive) return current
+        synchronized(this) {
+            if (!managerScope.isActive) {
+                Log.w(TAG, "CoroutineScope was cancelled or inactive; renewing with SupervisorJob + Dispatchers.Main")
+                managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+            }
+            return managerScope
+        }
+    }
+
+    private fun launchSafe(tag: String, block: suspend CoroutineScope.() -> Unit): Job? {
+        if (isReleased) return null
+        return try {
+            getSafeScope().launch {
+                try {
+                    block()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Uncaught exception in coroutine [$tag]", t)
+                    if (_ttsState.value == TtsState.PLAYING) {
+                        _errorMessage.value = "Playback encountered an unexpected error"
+                        _ttsState.value = TtsState.ERROR
+                        notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to launch coroutine [$tag]", t)
+            null
+        }
+    }
+
+    fun notifyAndPersistPosition(
+        paragraphIndex: Int,
+        state: TtsState,
+        subChunkIndex: Int = currentSubChunkIndex,
+        wasActivelyPlaying: Boolean = (state == TtsState.PLAYING),
+        interruptionReason: String = when (state) {
+            TtsState.PLAYING -> TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+            TtsState.PAUSED -> TtsInterruptionReason.EXPLICIT_PAUSE
+            TtsState.STOPPED -> TtsInterruptionReason.EXPLICIT_STOP
+            else -> TtsInterruptionReason.NONE
+        }
+    ) {
+        try {
+            onPositionChanged?.invoke(paragraphIndex, state)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Error invoking onPositionChanged callback", e)
+        }
+
+        try {
+            val repo = settingsRepository ?: return
+            val meta = _mediaMetadata.value
+            if (meta.bookId.isNotBlank() && meta.chapterId.isNotBlank()) {
+                repo.saveTtsSessionState(
+                    TtsPlaybackSessionState(
+                        bookId = meta.bookId,
+                        chapterId = meta.chapterId,
+                        chapterOrder = meta.chapterOrder,
+                        paragraphIndex = paragraphIndex,
+                        subChunkIndex = subChunkIndex,
+                        playbackState = state.name,
+                        speechRate = _speechRate.value,
+                        voiceId = _selectedVoice.value?.id ?: savedVoiceId,
+                        timestamp = System.currentTimeMillis(),
+                        wasActivelyPlaying = wasActivelyPlaying,
+                        interruptionReason = interruptionReason
+                    )
+                )
+                repo.setLastReadChapterId(meta.bookId, meta.chapterId)
+                repo.setLastReadParagraphIndex(meta.bookId, meta.chapterId, paragraphIndex)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Error persisting TTS position intrinsically", e)
+        }
+    }
+
+    // Bounded reinitialization & recovery state
+    private var reinitRetryCount = 0
+    private var lastReinitTimestamp = 0L
+    private val MAX_REINIT_RETRIES = 3
+    private val REINIT_WINDOW_MS = 60_000L
+    private var recoveryJob: Job? = null
+
+    /**
+     * Public recovery mechanism to recover TTS from an ERROR or uninitialized state without clearing app data.
+     * Resets the bounded retry counter, tears down any existing/stale TTS engine, and triggers a clean reinitialization.
+     * If resumePlaying is true, resumes playback once the engine is ready.
+     */
+    fun recoverFromError(
+        resumePlaying: Boolean = true,
+        startIndex: Int? = null,
+        startSubChunk: Int = 0
+    ) {
+        if (isReleased) return
+        Log.i(TAG, "recoverFromError invoked: resumePlaying=$resumePlaying, startIndex=$startIndex, startSubChunk=$startSubChunk")
+        recoveryJob?.cancel()
+        recoveryJob = null
+        reinitRetryCount = 0
+        lastReinitTimestamp = 0L
+
+        if (startIndex != null && paragraphs.isNotEmpty()) {
+            _currentParagraphIndex.value = startIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+        }
+        pendingStartSubChunk = startSubChunk
+
+        if (resumePlaying) {
+            wasPlayingBeforeEngineReinit = true
+        }
+
+        _errorMessage.value = "Reconnecting speech engine..."
+        _ttsState.value = TtsState.INITIALIZING
+
+        reinitialize(resumeOnReady = resumePlaying)
+    }
+
+    private fun triggerEngineRecovery(resumeOnReady: Boolean, reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastReinitTimestamp > REINIT_WINDOW_MS) {
+            reinitRetryCount = 0
+        }
+
+        _ttsState.value = TtsState.ERROR
+        notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
+        recoveryJob?.cancel()
+
+        if (reinitRetryCount < MAX_REINIT_RETRIES) {
+            reinitRetryCount++
+            lastReinitTimestamp = now
+            Log.w(TAG, "Non-fatal TTS failure ($reason). Scheduling recovery attempt $reinitRetryCount/$MAX_REINIT_RETRIES")
+            _errorMessage.value = "Reconnecting speech engine (attempt $reinitRetryCount/$MAX_REINIT_RETRIES)..."
+            recoveryJob = launchSafe("autoReinitialize") {
+                reinitialize(resumeOnReady = resumeOnReady)
+            }
+        } else {
+            Log.e(TAG, "Exceeded maximum TTS reinitialization attempts ($MAX_REINIT_RETRIES). Staying in ERROR state.")
+            _errorMessage.value = "Speech engine unavailable. Tap Play to retry."
+            audioFocusManager.abandonAudioFocus()
+        }
+    }
 
     private var ttsClient: TextToSpeechClient? = null
     private var nativeTts: TextToSpeech? = null
@@ -162,14 +331,19 @@ class ReaderTtsManager(
     private var utteranceSeq: Long = 0L
     private var activeUtteranceId: String? = null
     private var playbackSessionEpoch: Long = 0L
+    private var engineGeneration: Long = 1L
     private var isAdvancingChapter: Boolean = false
     private val isInitializing = java.util.concurrent.atomic.AtomicBoolean(false)
     private var isReleased = false
     private var wasPlayingBeforeBackground = false
     private var wasPlayingBeforeEngineReinit = false
+    private var pendingStartSubChunk: Int = 0
     private var currentVolume: Float = 1.0f
     var savedVoiceId: String? = null
     private var pendingInitCallback: (() -> Unit)? = null
+
+    fun getEngineGeneration(): Long = engineGeneration
+    fun getCurrentSubChunkIndex(): Int = currentSubChunkIndex
 
     val audioFocusManager: TtsAudioManager = TtsAudioManager(
         context = context.applicationContext,
@@ -210,8 +384,8 @@ class ReaderTtsManager(
 
     fun onAppBackgrounded() {
         // With foreground service, background playback continues seamlessly.
-        // We notify position listeners so state is saved.
-        onPositionChanged?.invoke(_currentParagraphIndex.value, _ttsState.value)
+        // We notify position listeners and persist state.
+        notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
     }
 
     fun onAppForegrounded(autoResume: Boolean = true) {
@@ -220,11 +394,17 @@ class ReaderTtsManager(
 
     fun reinitialize(resumeOnReady: Boolean = false, onSuccess: (() -> Unit)? = null) {
         if (isReleased) return
+        recoveryJob?.cancel()
+        recoveryJob = null
         if (resumeOnReady || _ttsState.value == TtsState.PLAYING) {
             wasPlayingBeforeEngineReinit = true
         }
+        playbackSessionEpoch++
+        engineGeneration++
+        activeUtteranceId = null
         try {
-            activeUtteranceId = null
+            ttsClient?.setOnUtteranceProgressListener(null)
+            nativeTts?.setOnUtteranceProgressListener(null)
             ttsClient?.stop()
             ttsClient?.shutdown()
             nativeTts?.shutdown()
@@ -263,6 +443,7 @@ class ReaderTtsManager(
             Log.e(TAG, "Failed to instantiate Android TextToSpeech engine", e)
             _errorMessage.value = "Speech engine unavailable"
             _ttsState.value = TtsState.ERROR
+            notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
         }
     }
 
@@ -285,7 +466,7 @@ class ReaderTtsManager(
 
                         override fun onDone(utteranceId: String?) {
                             if (isReleased) return
-                            scope.launch {
+                            launchSafe("onDone") {
                                 handleUtteranceDone(utteranceId)
                             }
                         }
@@ -297,7 +478,7 @@ class ReaderTtsManager(
 
                         override fun onError(utteranceId: String?, errorCode: Int) {
                             if (isReleased) return
-                            scope.launch {
+                            launchSafe("onError") {
                                 handleUtteranceError(utteranceId, errorCode)
                             }
                         }
@@ -314,8 +495,18 @@ class ReaderTtsManager(
 
                     if (wasPlayingBeforeEngineReinit && paragraphs.isNotEmpty()) {
                         wasPlayingBeforeEngineReinit = false
+                        val restoreSubChunk = pendingStartSubChunk
+                        pendingStartSubChunk = 0
                         _ttsState.value = TtsState.PLAYING
-                        speakCurrentParagraph(currentSubChunkIndex)
+                        audioFocusManager.requestAudioFocus()
+                        notifyAndPersistPosition(
+                            _currentParagraphIndex.value,
+                            TtsState.PLAYING,
+                            subChunkIndex = restoreSubChunk,
+                            wasActivelyPlaying = true,
+                            interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                        )
+                        speakCurrentParagraph(restoreSubChunk)
                     } else {
                         _ttsState.value = TtsState.IDLE
                     }
@@ -325,16 +516,19 @@ class ReaderTtsManager(
                 } else {
                     _errorMessage.value = "Speech engine unavailable"
                     _ttsState.value = TtsState.ERROR
+                    notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error configuring TTS engine", e)
                 _errorMessage.value = "Speech configuration failed"
                 _ttsState.value = TtsState.ERROR
+                notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
             }
         } else {
             Log.e(TAG, "TTS initialization failed with code: $status")
             _errorMessage.value = "Speech engine unavailable"
             _ttsState.value = TtsState.ERROR
+            notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
         }
     }
 
@@ -432,17 +626,19 @@ class ReaderTtsManager(
 
     /**
      * Updates the chapter ID and paragraphs.
-     * Optionally continues playing immediately from the specified start index.
+     * Optionally continues playing immediately from the specified start index and subchunk.
      */
     fun setChapterAndParagraphs(
         chapterId: String,
         newParagraphs: List<String>,
         continuePlaying: Boolean = false,
         startIndex: Int = 0,
+        startSubChunk: Int = 0,
         bookId: String = _mediaMetadata.value.bookId,
         novelTitle: String = _mediaMetadata.value.novelTitle,
         chapterTitle: String = _mediaMetadata.value.chapterTitle,
-        chapterOrder: Int = _mediaMetadata.value.chapterOrder
+        chapterOrder: Int = _mediaMetadata.value.chapterOrder,
+        targetState: TtsState? = null
     ) {
         if (isReleased) return
 
@@ -465,11 +661,29 @@ class ReaderTtsManager(
             _currentParagraphIndex.value = startIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
         }
 
-        currentSubChunkIndex = 0
+        currentSubChunkIndex = startSubChunk
         currentSubChunks = emptyList()
 
         if (continuePlaying && paragraphs.isNotEmpty() && _isTtsEnabled.value) {
-            play(_currentParagraphIndex.value)
+            play(_currentParagraphIndex.value, startSubChunk = startSubChunk)
+        } else if (targetState == TtsState.PAUSED) {
+            _ttsState.value = TtsState.PAUSED
+            notifyAndPersistPosition(
+                _currentParagraphIndex.value,
+                TtsState.PAUSED,
+                subChunkIndex = startSubChunk,
+                wasActivelyPlaying = false,
+                interruptionReason = TtsInterruptionReason.EXPLICIT_PAUSE
+            )
+        } else if (targetState == TtsState.STOPPED) {
+            _ttsState.value = TtsState.STOPPED
+            notifyAndPersistPosition(
+                _currentParagraphIndex.value,
+                TtsState.STOPPED,
+                subChunkIndex = startSubChunk,
+                wasActivelyPlaying = false,
+                interruptionReason = TtsInterruptionReason.EXPLICIT_STOP
+            )
         } else if (_ttsState.value == TtsState.PLAYING && chapterChanged) {
             stop()
         } else if (chapterChanged && _ttsState.value == TtsState.PAUSED) {
@@ -493,17 +707,27 @@ class ReaderTtsManager(
     }
 
     /**
-     * Starts playback from given paragraph index or current index.
+     * Starts playback from given paragraph index or current index and subchunk.
      * Previously playing speech is guaranteed to stop before starting the new paragraph.
      */
-    fun play(startIndex: Int? = null) {
+    fun play(startIndex: Int? = null, startSubChunk: Int = 0) {
         if (isReleased) return
         if (!_isTtsEnabled.value) {
             Log.w(TAG, "Cannot play while TTS is disabled")
             return
         }
-        if (_ttsState.value == TtsState.INITIALIZING || _ttsState.value == TtsState.ERROR) {
-            Log.w(TAG, "Cannot play while in state: ${_ttsState.value}")
+        if (_ttsState.value == TtsState.ERROR) {
+            Log.i(TAG, "play() called while in ERROR state; triggering automatic recovery")
+            recoverFromError(resumePlaying = true, startIndex = startIndex, startSubChunk = startSubChunk)
+            return
+        }
+        if (_ttsState.value == TtsState.INITIALIZING) {
+            Log.w(TAG, "play() called while in INITIALIZING state; setting pending autoplay")
+            wasPlayingBeforeEngineReinit = true
+            pendingStartSubChunk = startSubChunk
+            if (startIndex != null && paragraphs.isNotEmpty()) {
+                _currentParagraphIndex.value = startIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+            }
             return
         }
 
@@ -529,7 +753,7 @@ class ReaderTtsManager(
         if (startIndex != null) {
             _currentParagraphIndex.value = startIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
         }
-        currentSubChunkIndex = 0
+        currentSubChunkIndex = startSubChunk
         currentSubChunks = emptyList()
 
         _ttsState.value = TtsState.PLAYING
@@ -541,8 +765,14 @@ class ReaderTtsManager(
             Log.w(TAG, "Failed to start TtsPlaybackService", e)
         }
         onPlaybackStarted?.invoke()
-        onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.PLAYING)
-        speakCurrentParagraph(0)
+        notifyAndPersistPosition(
+            _currentParagraphIndex.value,
+            TtsState.PLAYING,
+            subChunkIndex = currentSubChunkIndex,
+            wasActivelyPlaying = true,
+            interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+        )
+        speakCurrentParagraph(startSubChunk)
     }
 
     /**
@@ -560,7 +790,13 @@ class ReaderTtsManager(
                 Log.w(TAG, "Error stopping TTS on pause", e)
             }
             _ttsState.value = TtsState.PAUSED
-            onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.PAUSED)
+            notifyAndPersistPosition(
+                _currentParagraphIndex.value,
+                TtsState.PAUSED,
+                subChunkIndex = currentSubChunkIndex,
+                wasActivelyPlaying = false,
+                interruptionReason = TtsInterruptionReason.EXPLICIT_PAUSE
+            )
         }
     }
 
@@ -579,7 +815,13 @@ class ReaderTtsManager(
                 Log.w(TAG, "Failed to start TtsPlaybackService", e)
             }
             onPlaybackStarted?.invoke()
-            onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.PLAYING)
+            notifyAndPersistPosition(
+                _currentParagraphIndex.value,
+                TtsState.PLAYING,
+                subChunkIndex = currentSubChunkIndex,
+                wasActivelyPlaying = true,
+                interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+            )
             speakCurrentParagraph(currentSubChunkIndex)
         }
     }
@@ -601,7 +843,13 @@ class ReaderTtsManager(
         }
         _ttsState.value = TtsState.STOPPED
         audioFocusManager.abandonAudioFocus()
-        onPositionChanged?.invoke(_currentParagraphIndex.value, TtsState.STOPPED)
+        notifyAndPersistPosition(
+            _currentParagraphIndex.value,
+            TtsState.STOPPED,
+            subChunkIndex = 0,
+            wasActivelyPlaying = false,
+            interruptionReason = TtsInterruptionReason.EXPLICIT_STOP
+        )
     }
 
     /**
@@ -618,7 +866,7 @@ class ReaderTtsManager(
         _currentParagraphIndex.value = prevIndex
         currentSubChunkIndex = 0
         currentSubChunks = emptyList()
-        onPositionChanged?.invoke(_currentParagraphIndex.value, _ttsState.value)
+        notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
 
         if (_ttsState.value == TtsState.PLAYING) {
             activeUtteranceId = null
@@ -641,7 +889,7 @@ class ReaderTtsManager(
         currentSubChunks = emptyList()
         if (nextIndex < paragraphs.size) {
             _currentParagraphIndex.value = nextIndex
-            onPositionChanged?.invoke(_currentParagraphIndex.value, _ttsState.value)
+            notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
             if (_ttsState.value == TtsState.PLAYING) {
                 activeUtteranceId = null
                 speakCurrentParagraph(0)
@@ -733,7 +981,7 @@ class ReaderTtsManager(
         val index = _currentParagraphIndex.value
         if (index !in paragraphs.indices) {
             _ttsState.value = TtsState.STOPPED
-            onPositionChanged?.invoke(index, TtsState.STOPPED)
+            notifyAndPersistPosition(index, TtsState.STOPPED)
             return
         }
 
@@ -749,7 +997,7 @@ class ReaderTtsManager(
             }
             if (nextIndex < paragraphs.size) {
                 _currentParagraphIndex.value = nextIndex
-                onPositionChanged?.invoke(nextIndex, TtsState.PLAYING)
+                notifyAndPersistPosition(nextIndex, TtsState.PLAYING)
                 speakCurrentParagraph(0)
             } else {
                 handleChapterEnd()
@@ -764,16 +1012,15 @@ class ReaderTtsManager(
         try {
             val client = ttsClient
             if (client == null) {
-                _errorMessage.value = "Speech engine unavailable"
-                _ttsState.value = TtsState.ERROR
-                reinitialize()
+                Log.w(TAG, "speakCurrentParagraph: client is null, attempting recovery")
+                triggerEngineRecovery(resumeOnReady = true, reason = "ttsClient was null")
                 return
             }
 
             client.setSpeechRate(_speechRate.value)
             _selectedVoice.value?.voice?.let { client.setVoice(it) }
 
-            val utteranceId = "utt_${currentChapterId}_${index}_${currentSubChunkIndex}_${++utteranceSeq}"
+            val utteranceId = "utt_g${engineGeneration}_e${playbackSessionEpoch}_${currentChapterId}_${index}_${currentSubChunkIndex}_${++utteranceSeq}"
             activeUtteranceId = utteranceId
 
             val params = Bundle().apply {
@@ -782,61 +1029,87 @@ class ReaderTtsManager(
             }
 
             val result = client.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
-            if (result != TextToSpeech.SUCCESS) {
-                Log.w(TAG, "speak() returned failure code: $result")
-                if (result == TextToSpeech.ERROR_INVALID_REQUEST || result == TextToSpeech.ERROR_SERVICE) {
-                    _errorMessage.value = "Speech engine busy. Reconnecting..."
-                    _ttsState.value = TtsState.ERROR
-                    reinitialize(resumeOnReady = true)
-                } else {
-                    _errorMessage.value = "Speech playback encountered an issue"
-                    _ttsState.value = TtsState.ERROR
+            if (result == TextToSpeech.SUCCESS) {
+                if (reinitRetryCount > 0 && System.currentTimeMillis() - lastReinitTimestamp > 5000L) {
+                    reinitRetryCount = 0
                 }
+            } else {
+                Log.w(TAG, "speak() returned failure code: $result")
+                triggerEngineRecovery(resumeOnReady = true, reason = "speak() returned failure code $result")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Exception during speakCurrentParagraph", e)
-            _errorMessage.value = "Speech playback encountered an issue"
-            _ttsState.value = TtsState.ERROR
+            triggerEngineRecovery(resumeOnReady = true, reason = "Exception during speak: ${e.message}")
         }
     }
 
     private fun handleUtteranceDone(utteranceId: String?) {
-        // Requirements: Never repeat a paragraph. Never skip a paragraph.
-        if (_ttsState.value != TtsState.PLAYING) return
-        if (utteranceId == null || utteranceId != activeUtteranceId) {
-            // Outdated, canceled, or duplicate callback - safely discard
-            return
-        }
-        activeUtteranceId = null
-
-        // If there are remaining sub-chunks for a long paragraph, speak next sub-chunk
-        if (currentSubChunkIndex < currentSubChunks.size - 1) {
-            currentSubChunkIndex++
-            val textToSpeak = currentSubChunks.getOrNull(currentSubChunkIndex) ?: ""
-            val nextUtteranceId = "utt_${currentChapterId}_${_currentParagraphIndex.value}_${currentSubChunkIndex}_${++utteranceSeq}"
-            activeUtteranceId = nextUtteranceId
-            val params = Bundle().apply {
-                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, currentVolume)
-                putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_MUSIC)
+        try {
+            // Requirements: Never repeat a paragraph. Never skip a paragraph.
+            if (_ttsState.value != TtsState.PLAYING) return
+            if (utteranceId == null || utteranceId != activeUtteranceId) {
+                // Outdated, canceled, or duplicate callback - safely discard
+                return
             }
-            ttsClient?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, params, nextUtteranceId)
-            return
-        }
+            val genPrefix = "utt_g${engineGeneration}_"
+            if (!utteranceId.startsWith(genPrefix)) {
+                Log.w(TAG, "Discarding onDone from stale engine generation: $utteranceId (current=$engineGeneration)")
+                return
+            }
+            activeUtteranceId = null
 
-        currentSubChunkIndex = 0
-        currentSubChunks = emptyList()
+            // If there are remaining sub-chunks for a long paragraph, speak next sub-chunk
+            if (currentSubChunkIndex < currentSubChunks.size - 1) {
+                currentSubChunkIndex++
+                notifyAndPersistPosition(
+                    _currentParagraphIndex.value,
+                    TtsState.PLAYING,
+                    subChunkIndex = currentSubChunkIndex,
+                    wasActivelyPlaying = true,
+                    interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                )
+                val textToSpeak = currentSubChunks.getOrNull(currentSubChunkIndex) ?: ""
+                val nextUtteranceId = "utt_g${engineGeneration}_e${playbackSessionEpoch}_${currentChapterId}_${_currentParagraphIndex.value}_${currentSubChunkIndex}_${++utteranceSeq}"
+                activeUtteranceId = nextUtteranceId
+                val params = Bundle().apply {
+                    putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, currentVolume)
+                    putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_MUSIC)
+                }
+                val result = ttsClient?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, params, nextUtteranceId)
+                if (result != null && result != TextToSpeech.SUCCESS) {
+                    Log.w(TAG, "speak() for sub-chunk failed: $result")
+                    triggerEngineRecovery(resumeOnReady = true, reason = "sub-chunk speak() returned failure code $result")
+                }
+                return
+            }
 
-        val bookId = _mediaMetadata.value.bookId.ifBlank { null }
-        var nextIndex = _currentParagraphIndex.value + 1
-        while (nextIndex < paragraphs.size - 1 && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
-            nextIndex++
-        }
-        if (nextIndex < paragraphs.size) {
-            _currentParagraphIndex.value = nextIndex
-            onPositionChanged?.invoke(nextIndex, TtsState.PLAYING)
-            speakCurrentParagraph(0)
-        } else {
-            handleChapterEnd()
+            currentSubChunkIndex = 0
+            currentSubChunks = emptyList()
+            reinitRetryCount = 0 // Utterance completed successfully; reset retry counter
+
+            val bookId = _mediaMetadata.value.bookId.ifBlank { null }
+            var nextIndex = _currentParagraphIndex.value + 1
+            while (nextIndex < paragraphs.size - 1 && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
+                nextIndex++
+            }
+            if (nextIndex < paragraphs.size) {
+                _currentParagraphIndex.value = nextIndex
+                notifyAndPersistPosition(
+                    nextIndex,
+                    TtsState.PLAYING,
+                    subChunkIndex = 0,
+                    wasActivelyPlaying = true,
+                    interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                )
+                speakCurrentParagraph(0)
+            } else {
+                handleChapterEnd()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.e(TAG, "Exception in handleUtteranceDone", e)
+            triggerEngineRecovery(resumeOnReady = true, reason = "Exception in handleUtteranceDone: ${e.message}")
         }
     }
 
@@ -866,9 +1139,14 @@ class ReaderTtsManager(
             val bookId = _mediaMetadata.value.bookId
             val chapterId = _mediaMetadata.value.chapterId
             if (bookId.isBlank() || chapterId.isBlank()) {
-                if (onChapterComplete != null) {
-                    onChapterComplete?.invoke()
-                } else {
+                try {
+                    if (onChapterComplete != null) {
+                        onChapterComplete?.invoke()
+                    } else {
+                        stop()
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Error during chapter end with blank IDs", e)
                     stop()
                 }
                 return
@@ -877,17 +1155,19 @@ class ReaderTtsManager(
             val currentEpoch = ++playbackSessionEpoch
             isAdvancingChapter = true
 
-            scope.launch {
+            launchSafe("handleChapterEnd") {
                 val nextData = try {
                     provider.getNextChapterContent(bookId, chapterId)
-                } catch (e: Exception) {
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
                     Log.e(TAG, "Error loading next chapter content", e)
                     null
                 }
 
                 if (playbackSessionEpoch != currentEpoch || _ttsState.value != TtsState.PLAYING || !isAdvancingChapter) {
                     isAdvancingChapter = false
-                    return@launch
+                    return@launchSafe
                 }
 
                 if (nextData != null && nextData.paragraphs.isNotEmpty()) {
@@ -896,50 +1176,85 @@ class ReaderTtsManager(
                         newParagraphs = nextData.paragraphs,
                         continuePlaying = true,
                         startIndex = 0,
+                        startSubChunk = 0,
                         bookId = bookId,
                         novelTitle = _mediaMetadata.value.novelTitle,
                         chapterTitle = nextData.nextChapterTitle,
                         chapterOrder = nextData.nextChapterOrder
                     )
-                    onChapterComplete?.invoke()
+                    try {
+                        onChapterComplete?.invoke()
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "Error invoking onChapterComplete", e)
+                    }
                 } else {
                     // End of novel or no speakable content in next chapter
                     stop()
-                    onChapterComplete?.invoke()
+                    notifyAndPersistPosition(
+                        _currentParagraphIndex.value,
+                        TtsState.STOPPED,
+                        subChunkIndex = 0,
+                        wasActivelyPlaying = false,
+                        interruptionReason = TtsInterruptionReason.NATURALLY_FINISHED
+                    )
+                    try {
+                        onChapterComplete?.invoke()
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "Error invoking onChapterComplete", e)
+                    }
                 }
                 isAdvancingChapter = false
             }
-        } else if (onChapterComplete != null) {
-            onChapterComplete?.invoke()
         } else {
-            stop()
+            try {
+                if (onChapterComplete != null) {
+                    onChapterComplete?.invoke()
+                } else {
+                    stop()
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Error during chapter end fallback", e)
+                stop()
+            }
         }
     }
 
     private fun handleUtteranceError(utteranceId: String?, errorCode: Int) {
-        if (_ttsState.value == TtsState.PLAYING && utteranceId == activeUtteranceId) {
+        try {
+            if (_ttsState.value != TtsState.PLAYING) return
+            if (utteranceId == null || utteranceId != activeUtteranceId) return
+            val genPrefix = "utt_g${engineGeneration}_"
+            if (!utteranceId.startsWith(genPrefix)) {
+                Log.w(TAG, "Discarding onError from stale engine generation: $utteranceId (current=$engineGeneration)")
+                return
+            }
             activeUtteranceId = null
             Log.w(TAG, "Utterance error for $utteranceId, code=$errorCode")
             when (errorCode) {
                 TextToSpeech.ERROR_INVALID_REQUEST, TextToSpeech.ERROR_SERVICE -> {
-                    _errorMessage.value = "Speech engine busy. Reconnecting..."
-                    reinitialize(resumeOnReady = true)
+                    triggerEngineRecovery(resumeOnReady = true, reason = "Utterance error: $errorCode")
                 }
                 TextToSpeech.ERROR_NOT_INSTALLED_YET -> {
                     _errorMessage.value = "Voice data is not installed yet"
                     _ttsState.value = TtsState.ERROR
                     audioFocusManager.abandonAudioFocus()
+                    notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
                 }
                 TextToSpeech.ERROR_NETWORK, TextToSpeech.ERROR_NETWORK_TIMEOUT -> {
                     _errorMessage.value = "Voice requires network connection"
                     _ttsState.value = TtsState.ERROR
                     audioFocusManager.abandonAudioFocus()
+                    notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
                 }
                 else -> {
                     Log.w(TAG, "Speech synthesis error ($errorCode) for paragraph ${_currentParagraphIndex.value}, advancing to next paragraph...")
                     advanceToNextParagraphOnError()
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.e(TAG, "Exception in handleUtteranceError", e)
         }
     }
 
@@ -954,7 +1269,13 @@ class ReaderTtsManager(
         }
         if (nextIndex < paragraphs.size) {
             _currentParagraphIndex.value = nextIndex
-            onPositionChanged?.invoke(nextIndex, TtsState.PLAYING)
+            notifyAndPersistPosition(
+                nextIndex,
+                TtsState.PLAYING,
+                subChunkIndex = 0,
+                wasActivelyPlaying = true,
+                interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+            )
             speakCurrentParagraph(0)
         } else {
             handleChapterEnd()
@@ -967,10 +1288,18 @@ class ReaderTtsManager(
     fun release() {
         if (isReleased) return
         isReleased = true
+        playbackSessionEpoch++
+        engineGeneration++
+        activeUtteranceId = null
+        recoveryJob?.cancel()
+        recoveryJob = null
         audioFocusManager.abandonAudioFocus()
         try {
+            ttsClient?.setOnUtteranceProgressListener(null)
+            nativeTts?.setOnUtteranceProgressListener(null)
             ttsClient?.stop()
             ttsClient?.shutdown()
+            nativeTts?.shutdown()
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing TTS client", e)
         } finally {

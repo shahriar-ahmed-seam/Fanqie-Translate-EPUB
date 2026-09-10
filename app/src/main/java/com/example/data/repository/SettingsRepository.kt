@@ -163,10 +163,13 @@ class SettingsRepository(context: Context) {
             putString("tts_session_chapter_id", state.chapterId)
             putInt("tts_session_chapter_order", state.chapterOrder)
             putInt("tts_session_paragraph_index", state.paragraphIndex.coerceAtLeast(0))
+            putInt("tts_session_subchunk_index", state.subChunkIndex.coerceAtLeast(0))
             putString("tts_session_playback_state", state.playbackState)
             putFloat("tts_session_speech_rate", state.speechRate)
             putString("tts_session_voice_id", state.voiceId)
             putLong("tts_session_timestamp", state.timestamp)
+            putBoolean("tts_session_was_actively_playing", state.wasActivelyPlaying)
+            putString("tts_session_interruption_reason", state.interruptionReason)
             putInt("last_read_para_${state.bookId}_${state.chapterId}", state.paragraphIndex.coerceAtLeast(0))
             putString("last_read_chapter_${state.bookId}", state.chapterId)
             putString("last_active_book_id", state.bookId)
@@ -182,10 +185,13 @@ class SettingsRepository(context: Context) {
             chapterId = chapterId,
             chapterOrder = prefs.getInt("tts_session_chapter_order", 0),
             paragraphIndex = prefs.getInt("tts_session_paragraph_index", 0),
+            subChunkIndex = prefs.getInt("tts_session_subchunk_index", 0),
             playbackState = prefs.getString("tts_session_playback_state", "IDLE") ?: "IDLE",
             speechRate = prefs.getFloat("tts_session_speech_rate", 1.0f),
             voiceId = prefs.getString("tts_session_voice_id", null),
-            timestamp = prefs.getLong("tts_session_timestamp", 0L)
+            timestamp = prefs.getLong("tts_session_timestamp", 0L),
+            wasActivelyPlaying = prefs.getBoolean("tts_session_was_actively_playing", false),
+            interruptionReason = prefs.getString("tts_session_interruption_reason", "NONE") ?: "NONE"
         )
     }
 
@@ -195,10 +201,13 @@ class SettingsRepository(context: Context) {
             remove("tts_session_chapter_id")
             remove("tts_session_chapter_order")
             remove("tts_session_paragraph_index")
+            remove("tts_session_subchunk_index")
             remove("tts_session_playback_state")
             remove("tts_session_speech_rate")
             remove("tts_session_voice_id")
             remove("tts_session_timestamp")
+            remove("tts_session_was_actively_playing")
+            remove("tts_session_interruption_reason")
             apply()
         }
     }
@@ -209,9 +218,13 @@ data class TtsPlaybackSessionState(
     val chapterId: String,
     val chapterOrder: Int = 0,
     val paragraphIndex: Int = 0,
+    val subChunkIndex: Int = 0,
     val playbackState: String = "IDLE",
     val speechRate: Float = 1.0f,
     val voiceId: String? = null,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val wasActivelyPlaying: Boolean = false,
+    val interruptionReason: String = "NONE"
 )
+
 

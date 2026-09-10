@@ -85,4 +85,130 @@ class TtsPlaybackServiceTest {
 
         controller.destroy()
     }
+
+    @Test
+    fun testServiceDestructionPreservesTtsManagerPositionCallback() {
+        val app = context.applicationContext as? com.example.TranslatorApplication
+        val controller = Robolectric.buildService(TtsPlaybackService::class.java)
+        controller.create().get()
+
+        // Verify observeTtsManager installed a position hook
+        assertNotNull(app?.ttsManager?.onPositionChanged)
+
+        // Destroy the service
+        controller.destroy()
+
+        // Verify the callback on ttsManager was NOT nullified by onDestroy()
+        assertNotNull(app?.ttsManager?.onPositionChanged)
+    }
+
+    @Test
+    fun testServiceRecreationReturnsStartSticky() {
+        val app = context.applicationContext as com.example.TranslatorApplication
+        val settingsRepo = app.settingsRepository
+        settingsRepo.saveTtsSessionState(
+            com.example.data.repository.TtsPlaybackSessionState(
+                bookId = "book_sticky",
+                chapterId = "chap_sticky",
+                paragraphIndex = 3,
+                subChunkIndex = 0,
+                playbackState = "PLAYING",
+                wasActivelyPlaying = true,
+                interruptionReason = "UNEXPECTED_INTERRUPTION"
+            )
+        )
+
+        val controller = Robolectric.buildService(TtsPlaybackService::class.java)
+        val service = controller.create().get()
+
+        val result = service.onStartCommand(null, 0, 1)
+        assertEquals(android.app.Service.START_STICKY, result)
+
+        controller.destroy()
+    }
+
+    @Test
+    fun testServiceRecreationWhenExplicitPauseDoesNotAutoplay() {
+        val app = context.applicationContext as com.example.TranslatorApplication
+        val settingsRepo = app.settingsRepository
+        settingsRepo.saveTtsSessionState(
+            com.example.data.repository.TtsPlaybackSessionState(
+                bookId = "book_paused",
+                chapterId = "chap_paused",
+                paragraphIndex = 5,
+                subChunkIndex = 1,
+                playbackState = "PAUSED",
+                wasActivelyPlaying = false,
+                interruptionReason = "EXPLICIT_PAUSE"
+            )
+        )
+
+        val controller = Robolectric.buildService(TtsPlaybackService::class.java)
+        val service = controller.create().get()
+
+        val result = service.onStartCommand(null, 0, 1)
+        assertEquals(android.app.Service.START_STICKY, result)
+
+        // Verify ttsManager does NOT start speaking
+        assertNotEquals(TtsState.PLAYING, app.ttsManager.ttsState.value)
+
+        controller.destroy()
+    }
+
+    @Test
+    fun testServiceRecreationWhenExplicitStopDoesNotAutoplay() {
+        val app = context.applicationContext as com.example.TranslatorApplication
+        val settingsRepo = app.settingsRepository
+        settingsRepo.saveTtsSessionState(
+            com.example.data.repository.TtsPlaybackSessionState(
+                bookId = "book_stopped",
+                chapterId = "chap_stopped",
+                paragraphIndex = 10,
+                subChunkIndex = 0,
+                playbackState = "STOPPED",
+                wasActivelyPlaying = false,
+                interruptionReason = "EXPLICIT_STOP"
+            )
+        )
+
+        val controller = Robolectric.buildService(TtsPlaybackService::class.java)
+        val service = controller.create().get()
+
+        val result = service.onStartCommand(null, 0, 1)
+        assertEquals(android.app.Service.START_NOT_STICKY, result)
+
+        // Verify ttsManager does NOT start speaking
+        assertNotEquals(TtsState.PLAYING, app.ttsManager.ttsState.value)
+
+        controller.destroy()
+    }
+
+    @Test
+    fun testServiceRecreationDuplicateCallsAreSafe() {
+        val app = context.applicationContext as com.example.TranslatorApplication
+        val settingsRepo = app.settingsRepository
+        settingsRepo.saveTtsSessionState(
+            com.example.data.repository.TtsPlaybackSessionState(
+                bookId = "book_dup",
+                chapterId = "chap_dup",
+                paragraphIndex = 2,
+                subChunkIndex = 0,
+                playbackState = "PLAYING",
+                wasActivelyPlaying = true,
+                interruptionReason = "UNEXPECTED_INTERRUPTION"
+            )
+        )
+
+        val controller = Robolectric.buildService(TtsPlaybackService::class.java)
+        val service = controller.create().get()
+
+        // Multiple rapid null intents should execute safely without crash or duplicate sessions
+        val res1 = service.onStartCommand(null, 0, 1)
+        val res2 = service.onStartCommand(null, 0, 2)
+        assertEquals(android.app.Service.START_STICKY, res1)
+        assertEquals(android.app.Service.START_STICKY, res2)
+
+        controller.destroy()
+    }
 }
+

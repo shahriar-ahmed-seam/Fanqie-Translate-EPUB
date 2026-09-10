@@ -90,7 +90,12 @@ fun ReaderScreen(
         ) {
             meta.chapterId
         } else {
-            initialChapterId
+            val sessionState = settingsRepo.getTtsSessionState()
+            if (sessionState != null && sessionState.bookId == bookId && sessionState.chapterId.isNotBlank()) {
+                sessionState.chapterId
+            } else {
+                initialChapterId
+            }
         }
         mutableStateOf(activeChapter)
     }
@@ -309,11 +314,16 @@ fun ReaderScreen(
         } else {
             // TTS is IDLE or STOPPED: safely prepare chapter in manager for reading
             val startPara = if (resumeTts) 0 else savedPara
+            val sessionState = settingsRepo.getTtsSessionState()
+            val savedSubChunk = if (sessionState != null && sessionState.bookId == bookId && sessionState.chapterId == currentChapterId) {
+                sessionState.subChunkIndex
+            } else 0
             ttsManager.setChapterAndParagraphs(
                 chapterId = currentChapterId,
                 newParagraphs = paragraphs,
                 continuePlaying = resumeTts,
                 startIndex = startPara,
+                startSubChunk = savedSubChunk,
                 bookId = bookId,
                 novelTitle = novelTitle,
                 chapterTitle = chapterTitle,
@@ -672,6 +682,8 @@ fun ReaderScreen(
                                         if (isCurrentChapterActiveInTts) {
                                             if (ttsState == TtsState.PAUSED) {
                                                 ttsManager.resume()
+                                            } else if (ttsState == TtsState.ERROR) {
+                                                ttsManager.recoverFromError(resumePlaying = true, startIndex = currentTtsParaIndex)
                                             } else {
                                                 ttsManager.play(currentTtsParaIndex)
                                             }

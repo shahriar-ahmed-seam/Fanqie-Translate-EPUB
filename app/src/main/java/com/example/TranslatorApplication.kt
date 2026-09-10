@@ -1,11 +1,16 @@
 package com.example
 
 import android.app.Application
+import android.util.Log
 import com.example.data.db.AppDatabase
 import com.example.data.db.toModel
 import com.example.data.repository.SettingsRepository
 import com.example.queue.TranslationQueueManager
 import com.example.service.TranslationService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 class TranslatorApplication : Application() {
@@ -25,6 +30,8 @@ class TranslatorApplication : Application() {
     lateinit var ttsManager: com.example.tts.ReaderTtsManager
         private set
 
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     companion object {
         lateinit var instance: TranslatorApplication
             private set
@@ -39,14 +46,24 @@ class TranslatorApplication : Application() {
         ttsTextProcessor = com.example.tts.rule.TtsTextProcessor()
 
         // Keep text processor synchronized with persisted TTS rules in Room
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            database.ttsRuleDao().observeAllRules().collect { entities ->
-                val models = entities.map { it.toModel() }
-                ttsTextProcessor.setRules(models)
+        applicationScope.launch {
+            try {
+                database.ttsRuleDao().observeAllRules().collect { entities ->
+                    val models = entities.map { it.toModel() }
+                    ttsTextProcessor.setRules(models)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.e("TranslatorApplication", "Error observing TTS rules from Room", e)
             }
         }
 
-        ttsManager = com.example.tts.ReaderTtsManager(this, textProcessor = ttsTextProcessor).apply {
+        ttsManager = com.example.tts.ReaderTtsManager(
+            context = this,
+            textProcessor = ttsTextProcessor,
+            settingsRepository = settingsRepository
+        ).apply {
             setTtsEnabled(settingsRepository.isTtsEnabled())
             setSpeechRate(settingsRepository.getTtsSpeechRate())
             setAutoAdvanceChapter(settingsRepository.isTtsAutoAdvanceChapterEnabled())
