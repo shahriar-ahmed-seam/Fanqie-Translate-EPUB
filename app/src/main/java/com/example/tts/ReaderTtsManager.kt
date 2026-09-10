@@ -1194,7 +1194,7 @@ class ReaderTtsManager(
         if (processedText.isBlank()) {
             // Skip empty paragraph automatically
             var nextIndex = index + 1
-            while (nextIndex < paragraphs.size - 1 && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
+            while (nextIndex < paragraphs.size && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
                 nextIndex++
             }
             if (nextIndex < paragraphs.size) {
@@ -1292,7 +1292,7 @@ class ReaderTtsManager(
 
             val bookId = _mediaMetadata.value.bookId.ifBlank { null }
             var nextIndex = _currentParagraphIndex.value + 1
-            while (nextIndex < paragraphs.size - 1 && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
+            while (nextIndex < paragraphs.size && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
                 nextIndex++
             }
             if (nextIndex < paragraphs.size) {
@@ -1595,7 +1595,7 @@ class ReaderTtsManager(
         currentSubChunks = emptyList()
         val bookId = _mediaMetadata.value.bookId.ifBlank { null }
         var nextIndex = _currentParagraphIndex.value + 1
-        while (nextIndex < paragraphs.size - 1 && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
+        while (nextIndex < paragraphs.size && textProcessor.process(paragraphs[nextIndex].trim(), bookId).isBlank()) {
             nextIndex++
         }
         if (nextIndex < paragraphs.size) {

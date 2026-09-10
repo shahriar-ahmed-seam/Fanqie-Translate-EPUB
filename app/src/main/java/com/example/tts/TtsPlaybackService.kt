@@ -528,11 +528,22 @@ class TtsPlaybackService : Service() {
                         chapterId = meta.chapterId,
                         chapterOrder = meta.chapterOrder,
                         paragraphIndex = paraIndex,
+                        subChunkIndex = ttsManager.getCurrentSubChunkIndex(),
                         playbackState = state.name,
                         speechRate = ttsManager.speechRate.value,
-                        voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId
+                        voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId,
+                        timestamp = System.currentTimeMillis(),
+                        wasActivelyPlaying = (state == TtsState.PLAYING),
+                        interruptionReason = when (state) {
+                            TtsState.PLAYING -> TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                            TtsState.PAUSED -> TtsInterruptionReason.EXPLICIT_PAUSE
+                            TtsState.STOPPED -> TtsInterruptionReason.EXPLICIT_STOP
+                            else -> TtsInterruptionReason.NONE
+                        }
                     )
                 )
+                settingsRepo.setLastReadChapterId(meta.bookId, meta.chapterId)
+                settingsRepo.setLastReadParagraphIndex(meta.bookId, meta.chapterId, paraIndex)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "Failed to persist TTS session state from service", e)

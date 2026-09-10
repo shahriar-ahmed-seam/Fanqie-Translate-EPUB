@@ -2206,6 +2206,53 @@ class ReaderTtsManagerTest {
         assertNotNull(manager.errorMessage.value)
         assertTrue(manager.errorMessage.value!!.contains("EPUB file corrupted"))
     }
+
+    @Test
+    fun testTrailingBlankParagraphsTriggerChapterTransitionDirectly() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        manager.setAutoAdvanceChapter(true)
+
+        val chapter2Data = ChapterTransitionData(
+            nextChapterId = "ch_2",
+            nextChapterTitle = "Chapter 2",
+            nextChapterOrder = 1,
+            paragraphs = listOf("Chapter 2 First Line")
+        )
+        val fakeProvider = object : ChapterTransitionProvider {
+            override suspend fun getNextChapterContent(bookId: String, currentChapterId: String): ChapterTransitionData? {
+                return if (currentChapterId == "ch_1") chapter2Data else null
+            }
+        }
+        manager.chapterTransitionProvider = fakeProvider
+
+        // Chapter 1 ends with trailing whitespace/empty paragraphs
+        manager.setChapterAndParagraphs(
+            chapterId = "ch_1",
+            newParagraphs = listOf("Chapter 1 Only Content Line", "   ", ""),
+            continuePlaying = true,
+            startIndex = 0,
+            bookId = "book_trailing_test"
+        )
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("Chapter 1 Only Content Line", fakeClient.spokenTexts.last())
+        val uttId = fakeClient.lastUtteranceId
+
+        fakeClient.listener?.onDone(uttId)
+        testScheduler.advanceUntilIdle()
+
+        // Should have cleanly transitioned to Chapter 2 line 0, skipping trailing blanks
+        assertEquals("ch_2", manager.mediaMetadata.value.chapterId)
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals("Chapter 2 First Line", fakeClient.spokenTexts.last())
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+    }
 }
 
 
