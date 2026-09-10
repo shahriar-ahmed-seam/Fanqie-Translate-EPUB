@@ -1047,6 +1047,11 @@ class ReaderTtsManager(
 
         if (_ttsState.value == TtsState.PLAYING) {
             activeUtteranceId = null
+            try {
+                ttsClient?.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping active speech on previousParagraph", e)
+            }
             speakCurrentParagraph(0)
         }
     }
@@ -1069,6 +1074,11 @@ class ReaderTtsManager(
             notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
             if (_ttsState.value == TtsState.PLAYING) {
                 activeUtteranceId = null
+                try {
+                    ttsClient?.stop()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error stopping active speech on nextParagraph", e)
+                }
                 speakCurrentParagraph(0)
             }
         } else {

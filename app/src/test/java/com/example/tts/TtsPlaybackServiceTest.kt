@@ -87,6 +87,93 @@ class TtsPlaybackServiceTest {
     }
 
     @Test
+    fun testNotificationContainsNovelChapterStateAndThreePrimaryActions() {
+        val app = context.applicationContext as com.example.TranslatorApplication
+        app.ttsManager.setChapterMetadata(
+            bookId = "book_notif_test",
+            chapterId = "chap_notif_test",
+            novelTitle = "Lord of the Mysteries",
+            chapterTitle = "Chapter 1: Crimson",
+            chapterOrder = 1
+        )
+
+        val controller = Robolectric.buildService(TtsPlaybackService::class.java)
+        val service = controller.create().get()
+
+        val notificationManager = service.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNm = org.robolectric.Shadows.shadowOf(notificationManager)
+        val notification = shadowNm.getNotification(TtsPlaybackService.NOTIFICATION_ID)
+        assertNotNull(notification)
+
+        // Title is novel name
+        assertEquals("Lord of the Mysteries", notification.extras.getString(Notification.EXTRA_TITLE))
+        // Content is chapter title
+        assertEquals("Chapter 1: Crimson", notification.extras.getString(Notification.EXTRA_TEXT))
+        // Subtext contains state and line info
+        val subText = notification.extras.getString(Notification.EXTRA_SUB_TEXT)
+        assertNotNull(subText)
+        assertTrue(subText!!.contains("Line"))
+
+        // 3 primary actions present
+        assertEquals(3, notification.actions.size)
+        assertEquals("Previous line", notification.actions[0].title.toString())
+        assertTrue(notification.actions[1].title.toString() == "Pause" || notification.actions[1].title.toString() == "Resume")
+        assertEquals("Next line", notification.actions[2].title.toString())
+
+        controller.destroy()
+    }
+
+    @Test
+    fun testPlayPauseToggleActionOperatesIndependentlyOfActivity() {
+        val app = context.applicationContext as com.example.TranslatorApplication
+        val ttsManager = app.ttsManager
+        ttsManager.onInit(android.speech.tts.TextToSpeech.SUCCESS)
+
+        ttsManager.setChapterAndParagraphs(
+            chapterId = "chap_independent",
+            newParagraphs = listOf("Paragraph 1", "Paragraph 2", "Paragraph 3"),
+            continuePlaying = false,
+            startIndex = 0,
+            bookId = "book_independent",
+            targetState = TtsState.PAUSED
+        )
+        assertEquals(TtsState.PAUSED, ttsManager.ttsState.value)
+        assertEquals(0, ttsManager.currentParagraphIndex.value)
+
+        val controller = Robolectric.buildService(TtsPlaybackService::class.java)
+        val service = controller.create().get()
+
+        // 1. Notification Next line action while paused
+        val nextIntent = Intent(context, TtsPlaybackService::class.java).apply {
+            action = TtsPlaybackService.ACTION_NEXT
+        }
+        service.onStartCommand(nextIntent, 0, 1)
+        assertEquals(1, ttsManager.currentParagraphIndex.value)
+        assertEquals(TtsState.PAUSED, ttsManager.ttsState.value)
+
+        // 2. Notification Previous line action while paused
+        val prevIntent = Intent(context, TtsPlaybackService::class.java).apply {
+            action = TtsPlaybackService.ACTION_PREV
+        }
+        service.onStartCommand(prevIntent, 0, 2)
+        assertEquals(0, ttsManager.currentParagraphIndex.value)
+        assertEquals(TtsState.PAUSED, ttsManager.ttsState.value)
+
+        // 3. Notification Play/Pause action (Resume)
+        val playPauseIntent = Intent(context, TtsPlaybackService::class.java).apply {
+            action = TtsPlaybackService.ACTION_PLAY_PAUSE
+        }
+        service.onStartCommand(playPauseIntent, 0, 3)
+        assertEquals(TtsState.PLAYING, ttsManager.ttsState.value)
+
+        // 4. Notification Play/Pause action (Pause)
+        service.onStartCommand(playPauseIntent, 0, 4)
+        assertEquals(TtsState.PAUSED, ttsManager.ttsState.value)
+
+        controller.destroy()
+    }
+
+    @Test
     fun testServiceDestructionPreservesTtsManagerPositionCallback() {
         val app = context.applicationContext as? com.example.TranslatorApplication
         val controller = Robolectric.buildService(TtsPlaybackService::class.java)

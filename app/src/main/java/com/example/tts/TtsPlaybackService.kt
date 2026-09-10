@@ -178,11 +178,25 @@ class TtsPlaybackService : Service() {
                 }
 
                 override fun onSkipToNext() {
-                    ttsManager?.nextParagraph()
+                    if (ttsManager?.getParagraphs()?.isEmpty() == true) {
+                        serviceScope.launch {
+                            app?.let { restoreSessionIfPossible(it, autoPlay = (ttsManager.ttsState.value == TtsState.PLAYING)) }
+                            ttsManager.nextParagraph()
+                        }
+                    } else {
+                        ttsManager?.nextParagraph()
+                    }
                 }
 
                 override fun onSkipToPrevious() {
-                    ttsManager?.previousParagraph()
+                    if (ttsManager?.getParagraphs()?.isEmpty() == true) {
+                        serviceScope.launch {
+                            app?.let { restoreSessionIfPossible(it, autoPlay = (ttsManager.ttsState.value == TtsState.PLAYING)) }
+                            ttsManager.previousParagraph()
+                        }
+                    } else {
+                        ttsManager?.previousParagraph()
+                    }
                 }
 
                 override fun onStop() {
@@ -316,10 +330,24 @@ class TtsPlaybackService : Service() {
                 }
             }
             ACTION_NEXT -> {
-                ttsManager.nextParagraph()
+                if (ttsManager.getParagraphs().isEmpty()) {
+                    serviceScope.launch {
+                        restoreSessionIfPossible(app, autoPlay = (ttsManager.ttsState.value == TtsState.PLAYING))
+                        ttsManager.nextParagraph()
+                    }
+                } else {
+                    ttsManager.nextParagraph()
+                }
             }
             ACTION_PREV -> {
-                ttsManager.previousParagraph()
+                if (ttsManager.getParagraphs().isEmpty()) {
+                    serviceScope.launch {
+                        restoreSessionIfPossible(app, autoPlay = (ttsManager.ttsState.value == TtsState.PLAYING))
+                        ttsManager.previousParagraph()
+                    }
+                } else {
+                    ttsManager.previousParagraph()
+                }
             }
             ACTION_STOP -> {
                 ttsManager.stop()
@@ -639,11 +667,17 @@ class TtsPlaybackService : Service() {
         }
         val playPauseText = if (isPlaying) "Pause" else "Resume"
 
-        val subText = when {
-            isRecovering -> "Recovering speech engine..."
-            totalParagraphs > 0 -> "Paragraph ${paragraphIndex + 1} of $totalParagraphs"
-            else -> "Audiobook"
+        val stateLabel = when (state) {
+            TtsState.PLAYING -> "Playing"
+            TtsState.PAUSED -> "Paused"
+            TtsState.RECOVERING -> "Recovering engine..."
+            TtsState.INITIALIZING -> "Initializing..."
+            TtsState.ERROR -> "Error"
+            TtsState.STOPPED -> "Stopped"
+            TtsState.IDLE -> "Idle"
         }
+        val lineInfo = if (totalParagraphs > 0) "Line ${paragraphIndex + 1} of $totalParagraphs" else "Line ${paragraphIndex + 1}"
+        val subText = if (isRecovering) "Recovering speech engine..." else "$stateLabel • $lineInfo"
 
         val mediaStyle = androidx.media.app.NotificationCompat.MediaStyle()
             .setMediaSession(mediaSession?.sessionToken)
@@ -660,9 +694,9 @@ class TtsPlaybackService : Service() {
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setOngoing(isPlaying || isRecovering)
             .setSilent(true)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", prevPendingIntent)
+            .addAction(android.R.drawable.ic_media_previous, "Previous line", prevPendingIntent)
             .addAction(playPauseIcon, playPauseText, playPausePendingIntent)
-            .addAction(android.R.drawable.ic_media_next, "Next", nextPendingIntent)
+            .addAction(android.R.drawable.ic_media_next, "Next line", nextPendingIntent)
             .setStyle(mediaStyle)
             .build()
     }
