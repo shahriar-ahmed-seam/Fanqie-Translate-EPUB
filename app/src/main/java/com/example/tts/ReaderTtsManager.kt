@@ -139,7 +139,8 @@ class ReaderTtsManager(
         (context.applicationContext as? com.example.TranslatorApplication)?.ttsTextProcessor ?: com.example.tts.rule.TtsTextProcessor(),
     private val settingsRepository: SettingsRepository? =
         (context.applicationContext as? com.example.TranslatorApplication)?.settingsRepository
-            ?: runCatching { SettingsRepository(context.applicationContext) }.getOrNull()
+            ?: runCatching { SettingsRepository(context.applicationContext) }.getOrNull(),
+    private val watchdogEnabled: Boolean = true
 ) : TextToSpeech.OnInitListener {
 
     private val TAG = "ReaderTtsManager"
@@ -250,6 +251,7 @@ class ReaderTtsManager(
     private fun teardownBrokenEngine() {
         isEngineReady.set(false)
         activeUtteranceId = null
+        cancelWatchdog()
         engineGeneration++
         playbackSessionEpoch++
         try {
@@ -427,6 +429,126 @@ class ReaderTtsManager(
     var savedVoiceId: String? = null
     private var pendingInitCallback: (() -> Unit)? = null
 
+    // ── TTS Watchdog / Heartbeat ──────────────────────────────────────────
+    // Detects silent engine stalls where speak() returns SUCCESS but
+    // onDone/onError never arrives.  Uses dynamic timeout based on text
+    // length and speech rate.
+    private var watchdogJob: Job? = null
+    @Volatile private var watchdogSpeakTimestamp: Long = 0L
+    @Volatile private var watchdogOnStartTimestamp: Long = 0L
+    private var watchdogUtteranceId: String? = null
+    private var watchdogTextLength: Int = 0
+    private var watchdogEngineGeneration: Long = 0L
+
+    /** Minimum timeout before the watchdog can declare a stall. */
+    private val WATCHDOG_MIN_TIMEOUT_MS = 15_000L
+    /** Maximum timeout (no single chunk exceeds 2500 chars). */
+    private val WATCHDOG_MAX_TIMEOUT_MS = 300_000L
+    /** How long to wait for onStart() after speak() returns SUCCESS. */
+    private val WATCHDOG_ON_START_TIMEOUT_MS = 10_000L
+    /** Safety multiplier applied to estimated speech duration. */
+    private val WATCHDOG_SAFETY_MULTIPLIER = 3.0
+    /** Approximate characters spoken per second at 1.0x speech rate. */
+    private val CHARS_PER_SECOND_AT_1X = 14.0
+
+    /**
+     * Estimates a generous timeout for an utterance to complete,
+     * based on text length and current speech rate.
+     */
+    private fun estimateUtteranceTimeoutMs(textLength: Int, speechRate: Float): Long {
+        val effectiveRate = speechRate.coerceAtLeast(0.5f)
+        val estimatedDurationMs = (textLength / (CHARS_PER_SECOND_AT_1X * effectiveRate) * 1000.0).toLong()
+        val withSafety = (estimatedDurationMs * WATCHDOG_SAFETY_MULTIPLIER).toLong()
+        return withSafety.coerceIn(WATCHDOG_MIN_TIMEOUT_MS, WATCHDOG_MAX_TIMEOUT_MS)
+    }
+
+    /**
+     * Arms the watchdog for the currently active utterance.
+     * Detects two classes of silent stall:
+     *   A. speak() succeeded but onStart() never arrives.
+     *   B. onStart() arrived but onDone()/onError() never arrives.
+     */
+    private fun startWatchdog() {
+        if (!watchdogEnabled) return
+        watchdogJob?.cancel()
+        val uttId = watchdogUtteranceId ?: return
+        val gen = watchdogEngineGeneration
+        val textLen = watchdogTextLength
+        val speakTs = watchdogSpeakTimestamp
+        val speechRate = _speechRate.value
+
+        watchdogJob = launchSafe("watchdog") {
+            try {
+                // Phase 1: wait for onStart()
+                delay(WATCHDOG_ON_START_TIMEOUT_MS)
+
+                // Check if still relevant
+                if (_ttsState.value != TtsState.PLAYING) return@launchSafe
+                if (activeUtteranceId != uttId) return@launchSafe
+                if (engineGeneration != gen) return@launchSafe
+
+                if (watchdogOnStartTimestamp == 0L) {
+                    // onStart never arrived → stall case A
+                    Log.w(TAG, "Watchdog: onStart() never arrived for $uttId after ${WATCHDOG_ON_START_TIMEOUT_MS}ms. Triggering recovery.")
+                    handleWatchdogStall(uttId, gen, "onStart() never arrived")
+                    return@launchSafe
+                }
+
+                // Phase 2: wait for onDone()/onError()
+                val totalTimeout = estimateUtteranceTimeoutMs(textLen, speechRate)
+                val remainingTimeout = (totalTimeout - WATCHDOG_ON_START_TIMEOUT_MS).coerceAtLeast(1_000L)
+                delay(remainingTimeout)
+
+                // Final check
+                if (_ttsState.value != TtsState.PLAYING) return@launchSafe
+                if (activeUtteranceId != uttId) return@launchSafe
+                if (engineGeneration != gen) return@launchSafe
+
+                // onDone/onError never arrived → stall case B
+                Log.w(TAG, "Watchdog: onDone()/onError() never arrived for $uttId (textLen=$textLen, rate=$speechRate). Triggering recovery.")
+                handleWatchdogStall(uttId, gen, "onDone()/onError() never arrived")
+            } catch (e: CancellationException) {
+                throw e
+            }
+        }
+    }
+
+    fun isWatchdogActive(): Boolean = watchdogJob?.isActive == true
+
+    /**
+     * Handles a confirmed watchdog stall by persisting state and triggering recovery.
+     */
+    private fun handleWatchdogStall(uttId: String, gen: Long, reason: String) {
+        // Guard: only act if the stalled utterance is still the active one
+        if (activeUtteranceId != uttId || engineGeneration != gen) return
+        if (_ttsState.value != TtsState.PLAYING) return
+
+        // Persist current checkpoint before recovery
+        notifyAndPersistPosition(
+            _currentParagraphIndex.value,
+            TtsState.PLAYING,
+            subChunkIndex = currentSubChunkIndex,
+            wasActivelyPlaying = true,
+            interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+        )
+
+        // Trigger recovery via existing bounded mechanism
+        triggerEngineRecovery(resumeOnReady = true, reason = "Watchdog: $reason")
+    }
+
+    /**
+     * Cancels the active watchdog coroutine and clears tracking state.
+     */
+    private fun cancelWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = null
+        watchdogUtteranceId = null
+        watchdogSpeakTimestamp = 0L
+        watchdogOnStartTimestamp = 0L
+        watchdogTextLength = 0
+        watchdogEngineGeneration = 0L
+    }
+
     fun getEngineGeneration(): Long = engineGeneration
     fun getCurrentSubChunkIndex(): Int = currentSubChunkIndex
 
@@ -588,7 +710,9 @@ class ReaderTtsManager(
                 if (client != null) {
                     client.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
-                            // Already in PLAYING state
+                            if (utteranceId != null && utteranceId == activeUtteranceId) {
+                                watchdogOnStartTimestamp = System.currentTimeMillis()
+                            }
                         }
 
                         override fun onDone(utteranceId: String?) {
@@ -952,6 +1076,7 @@ class ReaderTtsManager(
      */
     fun pause(isExplicitUserAction: Boolean = true) {
         if (isReleased) return
+        cancelWatchdog()
         playbackSessionEpoch++
         isAdvancingChapter.set(false)
         wasPlayingBeforeEngineReinit = false
@@ -1007,6 +1132,7 @@ class ReaderTtsManager(
      */
     fun stop() {
         if (isReleased) return
+        cancelWatchdog()
         playbackSessionEpoch++
         isAdvancingChapter.set(false)
         wasPlayingBeforeEngineReinit = false
@@ -1235,6 +1361,13 @@ class ReaderTtsManager(
                 if (reinitRetryCount > 0 && System.currentTimeMillis() - lastReinitTimestamp > 5000L) {
                     reinitRetryCount = 0
                 }
+                // Arm watchdog for this utterance
+                watchdogSpeakTimestamp = System.currentTimeMillis()
+                watchdogOnStartTimestamp = 0L
+                watchdogUtteranceId = utteranceId
+                watchdogTextLength = textToSpeak.length
+                watchdogEngineGeneration = engineGeneration
+                startWatchdog()
             } else {
                 Log.w(TAG, "speak() returned failure code: $result")
                 triggerEngineRecovery(resumeOnReady = true, reason = "speak() returned failure code $result")
@@ -1258,6 +1391,7 @@ class ReaderTtsManager(
                 Log.w(TAG, "Discarding onDone from stale engine generation: $utteranceId (current=$engineGeneration)")
                 return
             }
+            cancelWatchdog()
             activeUtteranceId = null
 
             // If there are remaining sub-chunks for a long paragraph, speak next sub-chunk
@@ -1282,6 +1416,14 @@ class ReaderTtsManager(
                 if (result != null && result != TextToSpeech.SUCCESS) {
                     Log.w(TAG, "speak() for sub-chunk failed: $result")
                     triggerEngineRecovery(resumeOnReady = true, reason = "sub-chunk speak() returned failure code $result")
+                } else if (result == TextToSpeech.SUCCESS) {
+                    // Arm watchdog for sub-chunk utterance
+                    watchdogSpeakTimestamp = System.currentTimeMillis()
+                    watchdogOnStartTimestamp = 0L
+                    watchdogUtteranceId = nextUtteranceId
+                    watchdogTextLength = textToSpeak.length
+                    watchdogEngineGeneration = engineGeneration
+                    startWatchdog()
                 }
                 return
             }
@@ -1550,6 +1692,7 @@ class ReaderTtsManager(
                 Log.w(TAG, "Discarding onError from stale engine generation: $utteranceId (current=$engineGeneration)")
                 return
             }
+            cancelWatchdog()
             activeUtteranceId = null
             Log.w(TAG, "Utterance error for $utteranceId, code=$errorCode")
             when (errorCode) {
@@ -1619,6 +1762,7 @@ class ReaderTtsManager(
     fun release() {
         if (isReleased) return
         isReleased = true
+        cancelWatchdog()
         isEngineReady.set(false)
         isRecovering.set(false)
         isAdvancingChapter.set(false)

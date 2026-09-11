@@ -99,7 +99,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
 
         assertEquals(TtsState.INITIALIZING, manager.ttsState.value)
@@ -118,7 +119,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
 
         // Trigger onInit error
@@ -135,7 +137,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -175,7 +178,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -217,7 +221,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -254,7 +259,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -279,7 +285,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -300,7 +307,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Test paragraph"))
@@ -317,7 +325,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         val paragraphs = listOf("Para 0", "Para 1", "Para 2", "Para 3")
@@ -341,7 +350,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         val paragraphs = listOf("Line 0", "Line 1", "Line 2")
@@ -372,7 +382,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -398,7 +409,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(false)
@@ -425,7 +437,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -449,7 +462,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Para 0", "Para 1"))
@@ -486,7 +500,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Line 1", "Line 2"))
@@ -518,7 +533,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Speed test paragraph"))
@@ -540,7 +556,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Voice test paragraph"))
@@ -574,7 +591,8 @@ class ReaderTtsManagerTest {
                 val client = FakeTtsClient()
                 activeClient = client
                 client
-            }
+            },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         assertEquals(1, createCount)
@@ -593,7 +611,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Test line"))
@@ -631,7 +650,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setChapterAndParagraphs("ch_1", listOf("Chapter 1 Para 1"), continuePlaying = false)
@@ -651,7 +671,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -693,7 +714,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -726,7 +748,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -755,7 +778,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = testScope,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -779,7 +803,8 @@ class ReaderTtsManagerTest {
             context = context,
             scope = testScope,
             clientFactory = { fakeClient },
-            textProcessor = processor
+            textProcessor = processor,
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -807,7 +832,8 @@ class ReaderTtsManagerTest {
             context = context,
             scope = testScope,
             clientFactory = { fakeClient },
-            textProcessor = processor
+            textProcessor = processor,
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -832,7 +858,8 @@ class ReaderTtsManagerTest {
             context = context,
             scope = testScope,
             clientFactory = { fakeClient },
-            textProcessor = processor
+            textProcessor = processor,
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -853,7 +880,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -895,7 +923,8 @@ class ReaderTtsManagerTest {
             context = context,
             scope = this,
             clientFactory = { fakeClient },
-            textProcessor = processor
+            textProcessor = processor,
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -923,7 +952,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -986,7 +1016,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -1048,7 +1079,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -1080,7 +1112,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -1124,7 +1157,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -1164,7 +1198,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setChapterAndParagraphs(
@@ -1205,7 +1240,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setChapterAndParagraphs(
@@ -1237,7 +1273,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Para 0", "Para 1"))
@@ -1272,7 +1309,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Para 0", "Para 1"))
@@ -1313,7 +1351,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setParagraphs(listOf("Para 0", "Para 1"))
@@ -1355,7 +1394,8 @@ class ReaderTtsManagerTest {
             context = context,
             scope = testScope,
             clientFactory = { fakeClient },
-            settingsRepository = repo
+            settingsRepository = repo,
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         // Ensure onPositionChanged is null
@@ -1390,7 +1430,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -1436,7 +1477,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         val initialGen = manager.getEngineGeneration()
@@ -1474,7 +1516,8 @@ class ReaderTtsManagerTest {
             context = context,
             scope = this,
             clientFactory = { fakeClient },
-            settingsRepository = repo
+            settingsRepository = repo,
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -1527,7 +1570,8 @@ class ReaderTtsManagerTest {
             context = context,
             scope = this,
             clientFactory = { fakeClient },
-            settingsRepository = repo
+            settingsRepository = repo,
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -1569,7 +1613,8 @@ class ReaderTtsManagerTest {
                 val client = FakeTtsClient()
                 activeClient = client
                 client
-            }
+            },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         assertEquals(1, createCount)
@@ -1624,7 +1669,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         // Note: onInit NOT called yet!
         assertFalse(manager.isEngineReady())
@@ -1665,7 +1711,8 @@ class ReaderTtsManagerTest {
                 val client = FakeTtsClient()
                 activeClient = client
                 client
-            }
+            },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -1711,7 +1758,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -1766,7 +1814,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setChapterAndParagraphs(
@@ -1804,7 +1853,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setChapterAndParagraphs(
@@ -1843,7 +1893,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setChapterAndParagraphs(
@@ -1877,7 +1928,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setChapterAndParagraphs(
@@ -1911,7 +1963,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -1958,7 +2011,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -2008,7 +2062,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -2043,7 +2098,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
 
@@ -2092,7 +2148,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -2139,7 +2196,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -2176,7 +2234,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -2213,7 +2272,8 @@ class ReaderTtsManagerTest {
         val manager = ReaderTtsManager(
             context = context,
             scope = this,
-            clientFactory = { fakeClient }
+            clientFactory = { fakeClient },
+            watchdogEnabled = false
         )
         manager.onInit(TextToSpeech.SUCCESS)
         manager.setAutoAdvanceChapter(true)
@@ -2253,7 +2313,406 @@ class ReaderTtsManagerTest {
         assertEquals("Chapter 2 First Line", fakeClient.spokenTexts.last())
         assertEquals(TtsState.PLAYING, manager.ttsState.value)
     }
+
+    // ── TTS Watchdog / Heartbeat Tests ──────────────────────────────────────
+
+    @Test
+    fun testWatchdogRecoversWhenOnStartNeverArrives() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+        assertEquals(1, createCount)
+
+        manager.setParagraphs(listOf("Test paragraph for watchdog"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        val originalUtt = activeClient!!.lastUtteranceId
+
+        // Do NOT fire onStart or onDone — simulate silent stall
+        // Advance past the onStart timeout (10s)
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+
+        // Watchdog should have triggered recovery
+        assertTrue(
+            "Expected recovery but state=${manager.ttsState.value}, createCount=$createCount",
+            manager.ttsState.value == TtsState.RECOVERING || createCount > 1
+        )
+    }
+
+    @Test
+    fun testWatchdogRecoversWhenOnDoneNeverArrives() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Short text: ~20 chars → estimated timeout = max(15s, 3 * (20/14) * 1000) = 15s
+        manager.setParagraphs(listOf("Short test paragraph"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Fire onStart to pass phase 1
+        activeClient!!.listener?.onStart(activeClient!!.lastUtteranceId)
+        testScheduler.advanceTimeBy(100)
+        testScheduler.runCurrent()
+
+        // Do NOT fire onDone — advance past the full timeout (15s from speak time)
+        // Phase 1 consumed 10s delay, then phase 2 needs remaining ~5s
+        // Total from speak: need to advance past 15s total
+        testScheduler.advanceTimeBy(16_000)
+        testScheduler.runCurrent()
+
+        // Watchdog should have triggered recovery
+        assertTrue(
+            "Expected recovery but state=${manager.ttsState.value}, createCount=$createCount",
+            manager.ttsState.value == TtsState.RECOVERING || createCount > 1
+        )
+    }
+
+    @Test
+    fun testWatchdogDoesNotFalselyRecoverNormalLongUtterance() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Normal paragraph text"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Fire onStart after 100ms
+        fakeClient.listener?.onStart(fakeClient.lastUtteranceId)
+        testScheduler.advanceTimeBy(100)
+        testScheduler.runCurrent()
+
+        // Fire onDone after 5 seconds (well within timeout)
+        testScheduler.advanceTimeBy(5_000)
+        testScheduler.runCurrent()
+        fakeClient.listener?.onDone(fakeClient.lastUtteranceId)
+        testScheduler.advanceUntilIdle()
+
+        // Playback should have advanced normally — NOT entered recovery
+        assertNotEquals(TtsState.RECOVERING, manager.ttsState.value)
+        assertNotEquals(TtsState.ERROR, manager.ttsState.value)
+    }
+
+    @Test
+    fun testWatchdogRecoveryPreservesParagraphIndex() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Para 0", "Para 1", "Para 2", "Para 3"))
+        manager.play(2) // Start at paragraph 2
+        assertEquals(2, manager.currentParagraphIndex.value)
+
+        // Stall: no onStart, no onDone
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+
+        // After recovery triggers, paragraph index must still be 2
+        assertEquals(2, manager.currentParagraphIndex.value)
+    }
+
+    @Test
+    fun testWatchdogRecoveryPreservesSubChunkIndex() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        // Build a paragraph that splits into ≥2 sub-chunks (>2500 chars)
+        val longPara = "This is a very long paragraph sentence that will be repeated many times to exceed the chunk limit. ".repeat(40)
+        manager.setChapterAndParagraphs("ch_wd", listOf(longPara, "Second paragraph"), continuePlaying = false)
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Complete the first sub-chunk to advance to sub-chunk 1
+        val firstUttId = activeClient!!.lastUtteranceId
+        activeClient!!.listener?.onStart(firstUttId)
+        activeClient!!.listener?.onDone(firstUttId)
+        testScheduler.advanceUntilIdle()
+
+        // Now playing sub-chunk 1, paragraph still 0
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals(1, manager.getCurrentSubChunkIndex())
+
+        // Stall on sub-chunk 1: no onStart, no onDone
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+
+        // Sub-chunk index must be preserved
+        assertEquals(0, manager.currentParagraphIndex.value)
+        assertEquals(1, manager.getCurrentSubChunkIndex())
+    }
+
+    @Test
+    fun testStaleCallbackFromOldEngineCannotAdvanceAfterWatchdogRecovery() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Line 0", "Line 1", "Line 2"))
+        manager.play(0)
+        val oldUttId = activeClient!!.lastUtteranceId
+        val oldListener = activeClient!!.listener
+        val oldGeneration = manager.getEngineGeneration()
+
+        // Stall → watchdog triggers recovery
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+
+        // Recovery creates new engine
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.advanceUntilIdle()
+
+        // Engine generation changed
+        assertNotEquals(oldGeneration, manager.getEngineGeneration())
+        assertEquals(0, manager.currentParagraphIndex.value)
+
+        // Late onDone from old engine must NOT advance paragraph
+        oldListener?.onDone(oldUttId)
+        testScheduler.advanceUntilIdle()
+
+        // Paragraph must still be 0
+        assertEquals(0, manager.currentParagraphIndex.value)
+    }
+
+    @Test
+    fun testPauseCancelsWatchdog() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Watchdog pause test"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Pause before watchdog timeout
+        testScheduler.advanceTimeBy(2_000)
+        manager.pause()
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+
+        // Advance past the full watchdog timeout
+        testScheduler.advanceTimeBy(20_000)
+        testScheduler.runCurrent()
+
+        // Watchdog must NOT have triggered recovery — still PAUSED
+        assertEquals(TtsState.PAUSED, manager.ttsState.value)
+    }
+
+    @Test
+    fun testStopCancelsWatchdog() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Watchdog stop test"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Stop before watchdog timeout
+        testScheduler.advanceTimeBy(2_000)
+        manager.stop()
+        assertEquals(TtsState.STOPPED, manager.ttsState.value)
+
+        // Advance past the full watchdog timeout
+        testScheduler.advanceTimeBy(20_000)
+        testScheduler.runCurrent()
+
+        // Watchdog must NOT have triggered recovery — still STOPPED
+        assertEquals(TtsState.STOPPED, manager.ttsState.value)
+    }
+
+    @Test
+    fun testSuccessfulOnDoneCancelsWatchdog() = runTest(testDispatcher) {
+        val fakeClient = FakeTtsClient()
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = { fakeClient }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Paragraph A"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        assertTrue(manager.isWatchdogActive())
+
+        // Fire onStart and onDone
+        fakeClient.listener?.onStart(fakeClient.lastUtteranceId)
+        fakeClient.listener?.onDone(fakeClient.lastUtteranceId)
+        testScheduler.runCurrent()
+
+        // Watchdog must be cancelled by onDone
+        assertFalse(manager.isWatchdogActive())
+        assertNotEquals(TtsState.RECOVERING, manager.ttsState.value)
+        assertNotEquals(TtsState.ERROR, manager.ttsState.value)
+
+        // Advance past all watchdog timeouts — no late recovery should fire
+        testScheduler.advanceTimeBy(20_000)
+        testScheduler.runCurrent()
+        assertNotEquals(TtsState.RECOVERING, manager.ttsState.value)
+        assertNotEquals(TtsState.ERROR, manager.ttsState.value)
+    }
+
+    @Test
+    fun testRepeatedStallsRespectRecoveryLimit() = runTest(testDispatcher) {
+        var createCount = 0
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                FakeTtsClient()
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Stall test paragraph"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Stall 1: Advance past onStart timeout (10s) -> RECOVERING
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+        // Complete engine creation backoff (500ms)
+        testScheduler.advanceTimeBy(1_000)
+        testScheduler.runCurrent()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Stall 2: Advance past onStart timeout (10s) -> RECOVERING
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+        // Complete engine creation backoff (1500ms)
+        testScheduler.advanceTimeBy(2_000)
+        testScheduler.runCurrent()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Stall 3: Advance past onStart timeout (10s) -> RECOVERING
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.RECOVERING, manager.ttsState.value)
+        // Complete engine creation backoff (3000ms)
+        testScheduler.advanceTimeBy(4_000)
+        testScheduler.runCurrent()
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+
+        // Stall 4: Exceeds MAX_REINIT_RETRIES (3) -> enters ERROR state
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+        assertEquals(TtsState.ERROR, manager.ttsState.value)
+        assertTrue("Expected at least 3 engine creations before ERROR", createCount >= 3)
+    }
+
+    @Test
+    fun testNoDuplicateSpeechAfterWatchdogRecovery() = runTest(testDispatcher) {
+        var createCount = 0
+        var activeClient: FakeTtsClient? = null
+        val manager = ReaderTtsManager(
+            context = context,
+            scope = this,
+            clientFactory = {
+                createCount++
+                val client = FakeTtsClient()
+                activeClient = client
+                client
+            }
+        )
+        manager.onInit(TextToSpeech.SUCCESS)
+
+        manager.setParagraphs(listOf("Recovery test line", "Next line"))
+        manager.play(0)
+        assertEquals(TtsState.PLAYING, manager.ttsState.value)
+        val client1 = activeClient!!
+        assertEquals(1, client1.spokenTexts.size)
+
+        // Stall → watchdog triggers recovery
+        testScheduler.advanceTimeBy(11_000)
+        testScheduler.runCurrent()
+
+        // Advance past recovery backoff (500ms) to instantiate new engine
+        testScheduler.advanceTimeBy(1_000)
+        testScheduler.runCurrent()
+        val client2 = activeClient!!
+        assertNotEquals(client1, client2)
+
+        // Recovery engine initializes and resumes playback
+        manager.onInit(TextToSpeech.SUCCESS)
+        testScheduler.runCurrent()
+
+        // After recovery, client2 should have spoken the recovery line exactly once
+        val recoveryLineCount = client2.spokenTexts.count { it == "Recovery test line" }
+        assertEquals("Expected exactly 1 speak of the recovery line on the new engine", 1, recoveryLineCount)
+        // Paragraph index unchanged
+        assertEquals(0, manager.currentParagraphIndex.value)
+    }
 }
-
-
-
