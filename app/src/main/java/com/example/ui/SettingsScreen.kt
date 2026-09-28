@@ -508,6 +508,8 @@ fun SettingsScreen(
                 )
             }
 
+            BackgroundPlaybackCard()
+
             // Chapter scraper settings live in the Scraper tab; this is a shortcut to them.
             if (onOpenScraperSettings != null) {
                 Card(

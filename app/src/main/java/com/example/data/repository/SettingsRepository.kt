@@ -149,6 +149,12 @@ class SettingsRepository(context: Context) {
         prefs.edit().putString("last_active_book_id", bookId).apply()
     }
 
+    fun wasBackgroundPlaybackPromptShown(): Boolean = prefs.getBoolean("background_playback_prompt_shown", false)
+
+    fun setBackgroundPlaybackPromptShown(shown: Boolean) {
+        prefs.edit().putBoolean("background_playback_prompt_shown", shown).apply()
+    }
+
     fun isTtsAutoResumePlaybackEnabled(): Boolean {
         return prefs.getBoolean("tts_auto_resume_playback", false)
     }

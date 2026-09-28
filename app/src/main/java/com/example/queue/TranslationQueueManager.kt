@@ -13,8 +13,14 @@ import com.example.translation.TranslationException
 import com.example.translation.TranslationProvider
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
@@ -57,6 +63,20 @@ class TranslationQueueManager(
     private var currentWorkerCount = 0
     private val roundRobinJobIndex = AtomicInteger(0)
     private val finalizingJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Whether any job can be worked on. Idle workers suspend on this instead of polling the database
+     * every second (20 workers used to run ~20 queries a second for as long as the process lived,
+     * including hours of screen-off audiobook playback). Starts true so workers check once at startup.
+     */
+    private val runnableJobsAvailable: StateFlow<Boolean> = database.jobDao().observeActiveJobs()
+        .map { jobs -> jobs.any { it.status in RUNNABLE_JOB_STATUSES } }
+        .distinctUntilChanged()
+        .catch { e ->
+            Log.e("QueueManager", "Active job observer failed; falling back to polling", e)
+            emit(true)
+        }
+        .stateIn(scope, SharingStarted.Eagerly, true)
 
     init {
         // Startup recovery:
@@ -105,7 +125,8 @@ class TranslationQueueManager(
         coordinatorJob = scope.launch {
             _isProcessing.value = true
 
-            // Keep worker pool synchronized with settings workerCount
+            // Keep worker pool synchronized with settings workerCount. Setting changes apply immediately
+            // through the settings collector; this slow tick only replaces workers that died.
             while (isActive) {
                 try {
                     val settings = settingsRepository.settings.value
@@ -113,7 +134,7 @@ class TranslationQueueManager(
                 } catch (e: Exception) {
                     Log.e("QueueManager", "Exception in queue coordinator", e)
                 }
-                delay(1000)
+                delay(COORDINATOR_TICK_MS)
             }
             _isProcessing.value = false
         }
@@ -192,7 +213,9 @@ class TranslationQueueManager(
                 val activeJobs = database.jobDao().getActiveJobs().take(settings.maxActiveBooks)
 
                 if (activeJobs.isEmpty()) {
-                    delay(1000)
+                    // Sleep until a job becomes runnable; the short delay absorbs a stale "true".
+                    runnableJobsAvailable.first { it }
+                    delay(IDLE_RECHECK_DELAY_MS)
                     continue
                 }
 
@@ -893,6 +916,13 @@ class TranslationQueueManager(
 
     private fun sanitizeFileName(name: String): String {
         return name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    }
+
+    private companion object {
+        /** Job states workers can claim chunks from (same set as JobDao.getActiveJobs). */
+        val RUNNABLE_JOB_STATUSES = setOf("QUEUED", "RUNNING", "TRANSLATING")
+        const val COORDINATOR_TICK_MS = 15_000L
+        const val IDLE_RECHECK_DELAY_MS = 250L
     }
 }
 
