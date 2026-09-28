@@ -6,22 +6,41 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.TranslatorApplication
 import com.example.data.db.BookEntity
 import com.example.data.db.TranslationJobEntity
+import com.example.diagnostics.AppDiagnostics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.first
 import java.text.NumberFormat
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Keeps the process in the foreground while translation jobs are active.
+ *
+ * It only runs while there is work: it stops itself a few seconds after the last active job finishes
+ * or pauses, and it stops cleanly when Android's dataSync time limit (Android 15+) is reached instead
+ * of letting the system crash the app, which used to take audiobook playback down with it.
+ */
 class TranslationService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var notificationJob: Job? = null
+    private var idleStopJob: Job? = null
+    /** Jobs seen active by this run, so the closing notification only reports what this run finished. */
+    private val jobsSeenActive = ConcurrentHashMap.newKeySet<String>()
+    @Volatile
+    private var lastNotification: Notification? = null
 
     private data class NotificationState(
         val jobs: List<TranslationJobEntity>,
@@ -32,6 +51,7 @@ class TranslationService : Service() {
     )
 
     companion object {
+        private const val TAG = "TranslationService"
         const val CHANNEL_ID = "epub_translation_channel"
         const val NOTIFICATION_ID = 1001
 
@@ -40,64 +60,69 @@ class TranslationService : Service() {
         const val ACTION_RESUME_JOB = "com.example.service.ACTION_RESUME_JOB"
         const val EXTRA_JOB_ID = "extra_job_id"
 
-        fun start(context: Context) {
-            val intent = Intent(context, TranslationService::class.java).apply {
-                action = ACTION_START
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        }
+        /** Job states that need the service (PAUSED jobs don't). */
+        val ACTIVE_STATUSES = setOf("QUEUED", "RUNNING", "TRANSLATING", "PAUSING")
 
-        fun pauseJob(context: Context, jobId: String) {
-            val intent = Intent(context, TranslationService::class.java).apply {
-                action = ACTION_PAUSE_JOB
-                putExtra(EXTRA_JOB_ID, jobId)
-            }
-            context.startService(intent)
-        }
+        /** Stop this long after the queue goes idle, so back-to-back jobs don't bounce the service. */
+        private const val IDLE_STOP_DELAY_MS = 3_000L
 
-        fun resumeJob(context: Context, jobId: String) {
-            val intent = Intent(context, TranslationService::class.java).apply {
-                action = ACTION_RESUME_JOB
-                putExtra(EXTRA_JOB_ID, jobId)
-            }
-            context.startService(intent)
+        /**
+         * Starts the service. Returns false when Android refuses (background start limits, time limit
+         * reached). Never throws: the queue keeps working in-process either way.
+         */
+        fun start(context: Context): Boolean =
+            send(context, Intent(context, TranslationService::class.java).setAction(ACTION_START))
+
+        fun pauseJob(context: Context, jobId: String): Boolean = send(
+            context,
+            Intent(context, TranslationService::class.java).setAction(ACTION_PAUSE_JOB).putExtra(EXTRA_JOB_ID, jobId)
+        )
+
+        fun resumeJob(context: Context, jobId: String): Boolean = send(
+            context,
+            Intent(context, TranslationService::class.java).setAction(ACTION_RESUME_JOB).putExtra(EXTRA_JOB_ID, jobId)
+        )
+
+        private fun send(context: Context, intent: Intent): Boolean = try {
+            ContextCompat.startForegroundService(context, intent)
+            true
+        } catch (e: Exception) {
+            // ForegroundServiceStartNotAllowedException (Android 12+), IllegalStateException, SecurityException.
+            Log.w(TAG, "Translation service start refused: ${e.javaClass.simpleName}: ${e.message}")
+            AppDiagnostics.log("translation", "Service start refused: ${e.javaClass.simpleName}: ${e.message}")
+            false
         }
     }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startInForeground()
-        observeTranslationProgress()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val app = applicationContext as? TranslatorApplication
-        val queueManager = app?.queueManager
-
-        when (intent?.action) {
-            ACTION_PAUSE_JOB -> {
-                val jobId = intent.getStringExtra(EXTRA_JOB_ID)
-                if (jobId != null) {
-                    queueManager?.pauseJob(jobId)
-                }
-            }
-            ACTION_RESUME_JOB -> {
-                val jobId = intent.getStringExtra(EXTRA_JOB_ID)
-                if (jobId != null) {
-                    queueManager?.resumeJob(jobId)
-                }
-            }
-            else -> {
-                queueManager?.startQueueProcessing()
-            }
+        // Every startForegroundService() must be answered with startForeground(), even when we then stop.
+        if (!startInForeground()) {
+            stopSelf()
+            return START_NOT_STICKY
         }
 
+        val queueManager = (applicationContext as? TranslatorApplication)?.queueManager
+        when (intent?.action) {
+            ACTION_PAUSE_JOB -> intent.getStringExtra(EXTRA_JOB_ID)?.let { queueManager?.pauseJob(it) }
+            ACTION_RESUME_JOB -> intent.getStringExtra(EXTRA_JOB_ID)?.let { queueManager?.resumeJob(it) }
+            else -> queueManager?.startQueueProcessing()
+        }
+
+        if (notificationJob?.isActive != true) observeTranslationProgress()
         return START_STICKY
+    }
+
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Android 15+ allows dataSync services ~6 h per day; the app must stop within seconds or it crashes.
+        Log.w(TAG, "dataSync time limit reached; stopping the translation service")
+        AppDiagnostics.log("translation", "dataSync time limit reached; service stopped (translation continues while the app is open)")
+        finishService(buildTimeLimitNotification())
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -122,17 +147,41 @@ class TranslationService : Service() {
         }
     }
 
-    private fun startInForeground() {
-        val initialNotification = buildInitialNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
+    private fun startInForeground(): Boolean {
+        val notification = lastNotification ?: buildInitialNotification()
+        return try {
+            ServiceCompat.startForeground(
+                this,
                 NOTIFICATION_ID,
-                initialNotification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                notification,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
             )
-        } else {
-            startForeground(NOTIFICATION_ID, initialNotification)
+            true
+        } catch (e: Exception) {
+            // Background start refused, or the daily dataSync limit is used up. The queue keeps running
+            // in-process; the app starts the service again the next time it is opened.
+            Log.w(TAG, "startForeground refused", e)
+            AppDiagnostics.log("translation", "startForeground refused: ${e.javaClass.simpleName}: ${e.message}")
+            false
         }
+    }
+
+    /** Leaves the foreground, optionally keeping [notice] visible (dismissible), and stops. */
+    private fun finishService(notice: Notification?) {
+        idleStopJob?.cancel()
+        notificationJob?.cancel()
+        try {
+            if (notice != null) {
+                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notice)
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            } else {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "stopForeground failed", e)
+        }
+        lastNotification = null
+        stopSelf()
     }
 
     private fun formatNumber(number: Int): String {
@@ -163,27 +212,115 @@ class TranslationService : Service() {
                     maxWorkers = settings.workerCount
                 )
             }.conflate().collect { state ->
-                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                    ?: return@collect
+                val activeJobs = state.jobs.filter { it.status in ACTIVE_STATUSES }
+                activeJobs.forEach { jobsSeenActive.add(it.id) }
 
-                val notif = buildGroupedNotification(state)
-                notificationManager.notify(NOTIFICATION_ID, notif)
+                if (activeJobs.isNotEmpty()) {
+                    idleStopJob?.cancel()
+                    idleStopJob = null
+                    val notification = buildGroupedNotification(state, ongoing = true)
+                    lastNotification = notification
+                    try {
+                        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Couldn't update the translation notification", e)
+                    }
+                } else if (idleStopJob?.isActive != true) {
+                    idleStopJob = launch {
+                        delay(IDLE_STOP_DELAY_MS)
+                        val stillIdle = database.jobDao().observeActiveJobs().first().isEmpty()
+                        if (stillIdle) {
+                            Log.i(TAG, "Translation queue idle; stopping the service")
+                            finishService(buildIdleSummary(state))
+                        }
+                    }
+                }
                 // Throttle updates to prevent OS notification spam
                 delay(500)
             }
         }
     }
 
-    private fun buildGroupedNotification(state: NotificationState): Notification {
+    /** What to leave behind when the queue goes idle: finished or paused work, or nothing. */
+    private fun buildIdleSummary(state: NotificationState): Notification? {
+        val paused = state.jobs.filter { it.status == "PAUSED" }
+        if (paused.isNotEmpty()) return buildGroupedNotification(state, ongoing = false)
+
+        val finished = state.jobs.filter { it.id in jobsSeenActive }
+        val completed = finished.count { it.status == "COMPLETED" }
+        val failed = finished.count { it.status == "FAILED" }
+        if (completed == 0 && failed == 0) return null
+
+        val title = when {
+            failed == 0 -> if (completed == 1) "Translation completed" else "All translations completed"
+            completed == 0 -> "Translation stopped with errors"
+            else -> "Translations finished"
+        }
+        val text = buildString {
+            if (completed > 0) append("$completed completed")
+            if (failed > 0) {
+                if (isNotEmpty()) append(" · ")
+                append("$failed with failed chunks (retry from the Queue tab)")
+            }
+        }
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(openAppPendingIntent())
+            .setAutoCancel(true)
+            .setOngoing(false)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    private fun buildTimeLimitNotification(): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Background translation paused by Android")
+            .setContentText("Android limits background translation time. Open the app to continue.")
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(
+                    "Android limits how long apps can translate in the background each day. " +
+                        "Open the app to continue; translation resumes automatically."
+                )
+            )
+            .setContentIntent(openAppPendingIntent())
+            .setAutoCancel(true)
+            .setOngoing(false)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+    private fun openAppPendingIntent(): PendingIntent {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        val pendingIntent = PendingIntent.getActivity(
+        return PendingIntent.getActivity(
             this,
             0,
             openAppIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+    }
+
+    /** Pause/Resume buttons restart the service if it already stopped (tapping them allows that). */
+    private fun jobActionPendingIntent(action: String, jobId: String): PendingIntent {
+        val intent = Intent(this, TranslationService::class.java).apply {
+            this.action = action
+            putExtra(EXTRA_JOB_ID, jobId)
+        }
+        val requestCode = (action + jobId).hashCode()
+        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(this, requestCode, intent, flags)
+        } else {
+            PendingIntent.getService(this, requestCode, intent, flags)
+        }
+    }
+
+    private fun buildGroupedNotification(state: NotificationState, ongoing: Boolean): Notification {
+        val pendingIntent = openAppPendingIntent()
 
         val activeOrQueuedJobs = state.jobs.filter {
             it.status in listOf("RUNNING", "TRANSLATING", "PAUSING", "QUEUED", "PAUSED")
@@ -197,17 +334,11 @@ class TranslationService : Service() {
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
 
         if (activeOrQueuedJobs.isEmpty()) {
-            val hasCompleted = state.jobs.any { it.status == "COMPLETED" }
-            val title = if (hasCompleted) "All translations completed" else "EPUB Translator"
-            val text = if (hasCompleted) "All EPUB translations finished successfully." else "Queue idle • 0 active jobs"
-
             return builder
-                .setContentTitle(title)
-                .setContentText(text)
-                .setSubText(if (hasCompleted) "Completed" else "Idle")
+                .setContentTitle("EPUB Translator")
+                .setContentText("Translation queue idle")
                 .setOngoing(false)
                 .setProgress(0, 0, false)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .build()
         }
 
@@ -242,7 +373,7 @@ class TranslationService : Service() {
                 .setContentTitle(englishTitle)
                 .setContentText(chunkProgressStr)
                 .setSubText(subText)
-                .setOngoing(true)
+                .setOngoing(ongoing)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(bigTextContent))
 
             if (job.status == "PAUSED" && !hasActiveNetwork) {
@@ -253,36 +384,16 @@ class TranslationService : Service() {
 
             // Pause / Resume action button directly in notification
             if (job.status in listOf("RUNNING", "TRANSLATING", "QUEUED")) {
-                val pauseIntent = Intent(this, TranslationService::class.java).apply {
-                    action = ACTION_PAUSE_JOB
-                    putExtra(EXTRA_JOB_ID, job.id)
-                }
-                val pausePendingIntent = PendingIntent.getService(
-                    this,
-                    job.id.hashCode(),
-                    pauseIntent,
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                )
                 builder.addAction(
                     android.R.drawable.ic_media_pause,
                     "Pause",
-                    pausePendingIntent
+                    jobActionPendingIntent(ACTION_PAUSE_JOB, job.id)
                 )
             } else if (job.status == "PAUSED") {
-                val resumeIntent = Intent(this, TranslationService::class.java).apply {
-                    action = ACTION_RESUME_JOB
-                    putExtra(EXTRA_JOB_ID, job.id)
-                }
-                val resumePendingIntent = PendingIntent.getService(
-                    this,
-                    job.id.hashCode(),
-                    resumeIntent,
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                )
                 builder.addAction(
                     android.R.drawable.ic_media_play,
                     "Resume",
-                    resumePendingIntent
+                    jobActionPendingIntent(ACTION_RESUME_JOB, job.id)
                 )
             }
 
@@ -311,7 +422,7 @@ class TranslationService : Service() {
 
         // Expanded BigText multi-novel details
         val bigTextContent = buildString {
-            activeOrQueuedJobs.forEachIndexed { index, job ->
+            activeOrQueuedJobs.forEach { job ->
                 val title = state.translatedTitles[job.bookId] ?: state.books[job.bookId]?.title ?: "Novel"
                 val statusSuffix = when (job.status) {
                     "PAUSED" -> " (Paused)"
@@ -328,7 +439,7 @@ class TranslationService : Service() {
             .setContentTitle(contentTitle)
             .setContentText(summaryText)
             .setSubText(multiSubText)
-            .setOngoing(true)
+            .setOngoing(ongoing)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigTextContent))
 
         if (!hasActiveNetwork && activeOrQueuedJobs.all { it.status == "PAUSED" }) {
@@ -340,31 +451,11 @@ class TranslationService : Service() {
         // Action button for multiple novels
         val runningJob = activeOrQueuedJobs.firstOrNull { it.status in listOf("RUNNING", "TRANSLATING") }
         if (runningJob != null) {
-            val pauseIntent = Intent(this, TranslationService::class.java).apply {
-                action = ACTION_PAUSE_JOB
-                putExtra(EXTRA_JOB_ID, runningJob.id)
-            }
-            val pausePendingIntent = PendingIntent.getService(
-                this,
-                runningJob.id.hashCode(),
-                pauseIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            builder.addAction(android.R.drawable.ic_media_pause, "Pause", pausePendingIntent)
+            builder.addAction(android.R.drawable.ic_media_pause, "Pause", jobActionPendingIntent(ACTION_PAUSE_JOB, runningJob.id))
         } else {
             val pausedJob = activeOrQueuedJobs.firstOrNull { it.status == "PAUSED" }
             if (pausedJob != null) {
-                val resumeIntent = Intent(this, TranslationService::class.java).apply {
-                    action = ACTION_RESUME_JOB
-                    putExtra(EXTRA_JOB_ID, pausedJob.id)
-                }
-                val resumePendingIntent = PendingIntent.getService(
-                    this,
-                    pausedJob.id.hashCode(),
-                    resumeIntent,
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                )
-                builder.addAction(android.R.drawable.ic_media_play, "Resume", resumePendingIntent)
+                builder.addAction(android.R.drawable.ic_media_play, "Resume", jobActionPendingIntent(ACTION_RESUME_JOB, pausedJob.id))
             }
         }
 
@@ -372,26 +463,15 @@ class TranslationService : Service() {
     }
 
     private fun buildInitialNotification(): Notification {
-        val openAppIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            openAppIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("EPUB Translator")
             .setContentText("Translation service active")
             .setSubText("Starting...")
-            .setContentIntent(pendingIntent)
+            .setContentIntent(openAppPendingIntent())
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 }
-

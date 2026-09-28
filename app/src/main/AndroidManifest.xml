@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Lets the user exempt audiobook playback from battery optimization (screen-off listening). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <queries>
         <intent>
@@ -26,7 +28,13 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.MyApplication">
+        <!-- Keeps a chapter scrape running with the screen off; mirrors the scraper's state only. -->
+        <service
+            android:name=".scraper.service.ScrapeForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <service
             android:name=".service.TranslationService"
             android:enabled="true"

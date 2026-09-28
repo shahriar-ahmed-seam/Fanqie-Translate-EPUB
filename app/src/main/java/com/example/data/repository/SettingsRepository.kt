@@ -13,7 +13,8 @@ data class AppSettings(
     val maxRetries: Int = 5,
     val timeoutSeconds: Int = 30,
     val githubOwner: String = "shahriar-ahmed-seam",
-    val githubRepo: String = "Fanqie-Translate-EPUB",
+    /** Public repository with the release APKs (the source repository is private). */
+    val githubRepo: String = com.example.update.AppUpdateManager.DEFAULT_REPO,
     val autoCheckUpdates: Boolean = true,
     val isDarkMode: Boolean = false
 )
@@ -50,13 +51,14 @@ class SettingsRepository(context: Context) {
     private fun loadSettings(): AppSettings {
         val rawOwner = prefs.getString("github_owner", "shahriar-ahmed-seam") ?: "shahriar-ahmed-seam"
         val owner = if (rawOwner.isBlank() || rawOwner.equals("shahriarseam", ignoreCase = true)) "shahriar-ahmed-seam" else rawOwner
-        val rawRepo = prefs.getString("github_repo", "Fanqie-Translate-EPUB") ?: "Fanqie-Translate-EPUB"
-        val repo = if (rawRepo.isBlank() || rawRepo.equals("epub-translator", ignoreCase = true)) "Fanqie-Translate-EPUB" else rawRepo
+        // Older versions saved the private source repository (or an older name); its releases API is
+        // unreachable, which is why update checks always failed. Those map to the public releases repo.
+        val repo = com.example.update.AppUpdateManager.sanitizeRepo(prefs.getString("github_repo", null) ?: "")
 
         return AppSettings(
             workerCount = prefs.getInt("worker_count", 20).coerceIn(1, 50),
             maxActiveBooks = prefs.getInt("max_active_books", 2).coerceIn(1, 5),
-            chunkSize = prefs.getInt("chunk_size", 4200).coerceIn(1000, 4800),
+            chunkSize = prefs.getInt("chunk_size", 4200).coerceIn(1000, com.example.translation.TomatoMTLProvider.MAX_REQUEST_CHARS),
             maxRetries = prefs.getInt("max_retries", 5).coerceIn(1, 10),
             timeoutSeconds = prefs.getInt("timeout_seconds", 30).coerceIn(5, 120),
             githubOwner = owner,
@@ -70,11 +72,11 @@ class SettingsRepository(context: Context) {
         val validated = AppSettings(
             workerCount = newSettings.workerCount.coerceIn(1, 50),
             maxActiveBooks = newSettings.maxActiveBooks.coerceIn(1, 5),
-            chunkSize = newSettings.chunkSize.coerceIn(1000, 4800),
+            chunkSize = newSettings.chunkSize.coerceIn(1000, com.example.translation.TomatoMTLProvider.MAX_REQUEST_CHARS),
             maxRetries = newSettings.maxRetries.coerceIn(1, 10),
             timeoutSeconds = newSettings.timeoutSeconds.coerceIn(5, 120),
             githubOwner = newSettings.githubOwner.trim().ifBlank { "shahriar-ahmed-seam" },
-            githubRepo = newSettings.githubRepo.trim().ifBlank { "Fanqie-Translate-EPUB" },
+            githubRepo = com.example.update.AppUpdateManager.sanitizeRepo(newSettings.githubRepo),
             autoCheckUpdates = newSettings.autoCheckUpdates,
             isDarkMode = newSettings.isDarkMode
         )
@@ -147,6 +149,12 @@ class SettingsRepository(context: Context) {
 
     fun setLastActiveBookId(bookId: String?) {
         prefs.edit().putString("last_active_book_id", bookId).apply()
+    }
+
+    fun wasBackgroundPlaybackPromptShown(): Boolean = prefs.getBoolean("background_playback_prompt_shown", false)
+
+    fun setBackgroundPlaybackPromptShown(shown: Boolean) {
+        prefs.edit().putBoolean("background_playback_prompt_shown", shown).apply()
     }
 
     fun isTtsAutoResumePlaybackEnabled(): Boolean {

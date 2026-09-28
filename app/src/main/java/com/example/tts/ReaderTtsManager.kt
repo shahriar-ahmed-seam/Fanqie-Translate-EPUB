@@ -5,9 +5,11 @@ import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
+import android.os.SystemClock
 import android.util.Log
 import com.example.data.repository.SettingsRepository
 import com.example.data.repository.TtsPlaybackSessionState
+import com.example.diagnostics.AppDiagnostics
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -140,8 +142,25 @@ class ReaderTtsManager(
     private val settingsRepository: SettingsRepository? =
         (context.applicationContext as? com.example.TranslatorApplication)?.settingsRepository
             ?: runCatching { SettingsRepository(context.applicationContext) }.getOrNull(),
-    private val watchdogEnabled: Boolean = true
+    private val watchdogEnabled: Boolean = true,
+    /**
+     * When the fast engine retries are used up while nobody is looking (screen off / app in the
+     * background), keep retrying in slower waves instead of stopping for good. Off by default so a
+     * visible failure still surfaces immediately; the app turns it on.
+     */
+    private val autoRetryInBackground: Boolean = false,
+    private val isAppInForeground: () -> Boolean = { true },
+    private val backgroundRetryDelaysMs: List<Long> = DEFAULT_BACKGROUND_RETRY_DELAYS_MS
 ) : TextToSpeech.OnInitListener {
+
+    companion object {
+        /** ~12.5 minutes of automatic retries in total, then playback waits for the user. */
+        val DEFAULT_BACKGROUND_RETRY_DELAYS_MS = listOf(30_000L, 60_000L, 120_000L, 240_000L, 300_000L)
+        /** Keep the CPU awake this long at most while paused by a call or another app's short sound. */
+        const val MAX_TRANSIENT_PAUSE_WAKE_MS = 30 * 60 * 1000L
+        /** Consecutive empty chapters (cover or image pages) skipped during auto-advance. */
+        const val MAX_EMPTY_CHAPTER_SKIPS = 20
+    }
 
     private val TAG = "ReaderTtsManager"
 
@@ -216,7 +235,8 @@ class ReaderTtsManager(
                         subChunkIndex = subChunkIndex,
                         playbackState = state.name,
                         speechRate = _speechRate.value,
-                        voiceId = _selectedVoice.value?.id ?: savedVoiceId,
+                        // The preferred voice, not a temporary offline fallback.
+                        voiceId = savedVoiceId ?: _selectedVoice.value?.id,
                         timestamp = System.currentTimeMillis(),
                         wasActivelyPlaying = wasActivelyPlaying,
                         interruptionReason = interruptionReason
@@ -279,8 +299,19 @@ class ReaderTtsManager(
         startIndex: Int? = null,
         startSubChunk: Int = 0
     ) {
+        // A user-initiated retry starts the automatic retry schedule over.
+        recoverFromErrorInternal(resumePlaying, startIndex, startSubChunk, fromAutoRetry = false)
+    }
+
+    private fun recoverFromErrorInternal(
+        resumePlaying: Boolean,
+        startIndex: Int?,
+        startSubChunk: Int,
+        fromAutoRetry: Boolean
+    ) {
         if (isReleased) return
-        Log.i(TAG, "recoverFromError invoked: resumePlaying=$resumePlaying, startIndex=$startIndex, startSubChunk=$startSubChunk")
+        Log.i(TAG, "recoverFromError invoked: resumePlaying=$resumePlaying, startIndex=$startIndex, startSubChunk=$startSubChunk, auto=$fromAutoRetry")
+        cancelBackgroundRetry(resetWaves = !fromAutoRetry)
         recoveryJob?.cancel()
         recoveryJob = null
         isRecovering.set(false)
@@ -335,6 +366,7 @@ class ReaderTtsManager(
             _ttsState.value = TtsState.RECOVERING
             _errorMessage.value = "Recovering speech engine (attempt $reinitRetryCount/$MAX_REINIT_RETRIES)..."
             Log.w(TAG, "Non-fatal TTS failure ($reason). Scheduling recovery attempt $reinitRetryCount/$MAX_REINIT_RETRIES")
+            AppDiagnostics.log("tts", "Engine recovery $reinitRetryCount/$MAX_REINIT_RETRIES: $reason")
 
             // Preserve current reading position
             notifyAndPersistPosition(
@@ -365,6 +397,8 @@ class ReaderTtsManager(
         } else {
             isRecovering.set(false)
             Log.e(TAG, "Exceeded maximum TTS recovery attempts ($MAX_REINIT_RETRIES). Entering ERROR state.")
+            AppDiagnostics.log("tts", "Engine recovery attempts used up ($reason)")
+            if (wasPlayingBeforeEngineReinit && scheduleBackgroundRetry("engine recovery failed: $reason")) return
             _errorMessage.value = "Speech engine unavailable. Tap Play to retry."
             _ttsState.value = TtsState.ERROR
             audioFocusManager.abandonAudioFocus()
@@ -376,6 +410,78 @@ class ReaderTtsManager(
                 interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
             )
         }
+    }
+
+    // ── Background auto-retry ─────────────────────────────────────────────
+    // With the screen off nobody can tap "retry", so a failure that outlives the fast retries (engine
+    // being updated or restarted, network voice offline) gets slower retry waves before giving up.
+    private val _autoRetryPending = MutableStateFlow(false)
+    /** True while an automatic retry is scheduled (the session still wants to play). */
+    val autoRetryPending: StateFlow<Boolean> = _autoRetryPending.asStateFlow()
+    private var backgroundRetryJob: Job? = null
+    private var backgroundRetryWave = 0
+
+    /**
+     * Schedules the next automatic retry wave. Returns false (caller shows the normal error) when the
+     * feature is off, the app is visible, or the waves are used up.
+     */
+    private fun scheduleBackgroundRetry(reason: String): Boolean {
+        if (!autoRetryInBackground || isReleased) return false
+        val visible = try {
+            isAppInForeground()
+        } catch (e: Throwable) {
+            true
+        }
+        if (visible || backgroundRetryWave >= backgroundRetryDelaysMs.size) return false
+
+        val waitMs = backgroundRetryDelaysMs[backgroundRetryWave]
+        backgroundRetryWave++
+        val wave = backgroundRetryWave
+        cancelWatchdog()
+        activeUtteranceId = null
+        recoveryJob?.cancel()
+        recoveryJob = null
+        isRecovering.set(false)
+        wasPlayingBeforeEngineReinit = false
+        _errorMessage.value = "Speech engine unavailable. Retrying automatically in ${waitMs / 1000}s. Tap Play to retry now."
+        _ttsState.value = TtsState.ERROR
+        _autoRetryPending.value = true
+        audioFocusManager.abandonAudioFocus()
+        // Keep "was playing" so a process restart during the wait resumes too.
+        notifyAndPersistPosition(
+            _currentParagraphIndex.value,
+            TtsState.ERROR,
+            subChunkIndex = currentSubChunkIndex,
+            wasActivelyPlaying = true,
+            interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+        )
+        AppDiagnostics.log("tts", "Automatic retry $wave/${backgroundRetryDelaysMs.size} in ${waitMs / 1000}s ($reason)")
+
+        backgroundRetryJob?.cancel()
+        backgroundRetryJob = launchSafe("backgroundRetry") {
+            delay(waitMs)
+            if (!_autoRetryPending.value || isReleased) return@launchSafe
+            backgroundRetryJob = null
+            _autoRetryPending.value = false
+            Log.i(TAG, "Automatic retry wave $wave starting")
+            recoverFromErrorInternal(
+                resumePlaying = true,
+                startIndex = null,
+                startSubChunk = currentSubChunkIndex,
+                fromAutoRetry = true
+            )
+        }
+        return true
+    }
+
+    private fun cancelBackgroundRetry(resetWaves: Boolean) {
+        backgroundRetryJob?.cancel()
+        backgroundRetryJob = null
+        if (_autoRetryPending.value && _ttsState.value == TtsState.ERROR) {
+            _errorMessage.value = "Speech engine unavailable. Tap Play to retry."
+        }
+        _autoRetryPending.value = false
+        if (resetWaves) backgroundRetryWave = 0
     }
 
     private var ttsClient: TextToSpeechClient? = null
@@ -571,12 +677,63 @@ class ReaderTtsManager(
 
     private fun handleAudioFocusLoss() {
         Log.i(TAG, "Audio focus lost permanently. Pausing playback and preserving position.")
+        if (_ttsState.value == TtsState.PLAYING) AppDiagnostics.log("tts", "Paused: another app took audio focus")
         pause(isExplicitUserAction = false)
     }
 
     private fun handleAudioFocusTransientLoss() {
         Log.i(TAG, "Audio focus lost transiently (e.g. phone call/alert). Pausing playback.")
+        if (_ttsState.value == TtsState.PLAYING) AppDiagnostics.log("tts", "Paused for a short interruption (call or alert)")
+        transientPauseStartedAt = SystemClock.elapsedRealtime()
         pause(isExplicitUserAction = false)
+    }
+
+    /** When the current pause was caused by a short audio interruption (for wake-lock decisions). */
+    private var transientPauseStartedAt = 0L
+
+    /**
+     * Starts audio focus for playback. Returns false when focus is delayed (e.g. during a call): the
+     * session then waits PAUSED and resumes by itself when focus arrives.
+     */
+    private fun acquireFocusOrWait(): Boolean {
+        audioFocusManager.requestAudioFocus()
+        if (audioFocusManager.focusState != AudioFocusState.DELAYED_FOCUS) return true
+        Log.i(TAG, "Audio focus delayed; waiting for it before speaking")
+        transientPauseStartedAt = SystemClock.elapsedRealtime()
+        _ttsState.value = TtsState.PAUSED
+        notifyAndPersistPosition(
+            _currentParagraphIndex.value,
+            TtsState.PAUSED,
+            subChunkIndex = currentSubChunkIndex,
+            wasActivelyPlaying = false,
+            interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+        )
+        return false
+    }
+
+    /**
+     * Whether the CPU must stay awake for this session: while speaking, recovering the engine,
+     * loading the next chapter, waiting for an automatic retry, or briefly paused by a call.
+     * Idle, stopped and user-paused sessions let the phone sleep.
+     */
+    fun wantsCpuAwake(): Boolean = when (_ttsState.value) {
+        TtsState.PLAYING, TtsState.RECOVERING -> true
+        TtsState.INITIALIZING -> wasPlayingBeforeEngineReinit
+        TtsState.ERROR -> _autoRetryPending.value
+        TtsState.PAUSED -> audioFocusManager.pausedDueToTransientLoss &&
+            SystemClock.elapsedRealtime() - transientPauseStartedAt < MAX_TRANSIENT_PAUSE_WAKE_MS
+        else -> false
+    } || isAdvancingChapter.get()
+
+    /** A session the user would expect to find again: playing, paused, recovering or retrying. */
+    fun hasActiveSession(): Boolean {
+        if (_mediaMetadata.value.bookId.isBlank() || _mediaMetadata.value.chapterId.isBlank()) return false
+        return when (_ttsState.value) {
+            TtsState.PLAYING, TtsState.PAUSED, TtsState.RECOVERING -> true
+            TtsState.ERROR -> _autoRetryPending.value
+            TtsState.INITIALIZING -> wasPlayingBeforeEngineReinit
+            else -> false
+        }
     }
 
     private fun handleAudioFocusGain() {
@@ -610,9 +767,30 @@ class ReaderTtsManager(
     }
 
     fun onAppBackgrounded() {
-        // With foreground service, background playback continues seamlessly.
-        // We notify position listeners and persist state.
-        notifyAndPersistPosition(_currentParagraphIndex.value, _ttsState.value)
+        // With foreground service, background playback continues seamlessly. Only a live session is
+        // checkpointed: an idle manager still holds the chapter the reader last prepared, and saving
+        // that would overwrite the newer reading position the reader just stored.
+        if (!hasActiveSession()) return
+        notifyAndPersistPosition(
+            _currentParagraphIndex.value,
+            _ttsState.value,
+            wasActivelyPlaying = wantsToPlay(),
+            interruptionReason = when {
+                wantsToPlay() -> TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                _ttsState.value == TtsState.PAUSED && audioFocusManager.pausedDueToTransientLoss ->
+                    TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                _ttsState.value == TtsState.PAUSED -> TtsInterruptionReason.EXPLICIT_PAUSE
+                else -> TtsInterruptionReason.NONE
+            }
+        )
+    }
+
+    /** The session is playing or trying to get back to playing. */
+    private fun wantsToPlay(): Boolean = when (_ttsState.value) {
+        TtsState.PLAYING, TtsState.RECOVERING -> true
+        TtsState.ERROR -> _autoRetryPending.value
+        TtsState.INITIALIZING -> wasPlayingBeforeEngineReinit
+        else -> false
     }
 
     fun onAppForegrounded(autoResume: Boolean = true) {
@@ -769,16 +947,18 @@ class ReaderTtsManager(
                     if (shouldResume) {
                         val restoreSubChunk = pendingStartSubChunk
                         pendingStartSubChunk = 0
+                        currentSubChunkIndex = restoreSubChunk
                         _ttsState.value = TtsState.PLAYING
-                        audioFocusManager.requestAudioFocus()
-                        notifyAndPersistPosition(
-                            _currentParagraphIndex.value,
-                            TtsState.PLAYING,
-                            subChunkIndex = restoreSubChunk,
-                            wasActivelyPlaying = true,
-                            interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
-                        )
-                        speakCurrentParagraph(restoreSubChunk)
+                        if (acquireFocusOrWait()) {
+                            notifyAndPersistPosition(
+                                _currentParagraphIndex.value,
+                                TtsState.PLAYING,
+                                subChunkIndex = restoreSubChunk,
+                                wasActivelyPlaying = true,
+                                interruptionReason = TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+                            )
+                            speakCurrentParagraph(restoreSubChunk)
+                        }
                     } else if (_ttsState.value == TtsState.PAUSED) {
                         _ttsState.value = TtsState.PAUSED
                         notifyAndPersistPosition(
@@ -907,6 +1087,12 @@ class ReaderTtsManager(
      * session epoch to guarantee stale callbacks from previous chapters are discarded.
      */
     fun prepareForChapterChange() {
+        // Pause rather than silently dropping the utterance: leaving the state PLAYING with nothing
+        // being spoken ("zombie" playback) kept the wake lock and notification up in silence whenever
+        // the new chapter didn't take over. The caller starts the new chapter with continuePlaying.
+        if (_ttsState.value == TtsState.PLAYING || _ttsState.value == TtsState.RECOVERING) {
+            pause(isExplicitUserAction = true)
+        }
         playbackSessionEpoch++
         isAdvancingChapter.set(false)
         activeUtteranceId = null
@@ -943,6 +1129,9 @@ class ReaderTtsManager(
         val chapterChanged = currentChapterId != chapterId
         currentChapterId = chapterId
         paragraphs = newParagraphs
+        pendingChapterAdvance = false
+        // Another chapter was loaded without playing: an automatic retry must not start it by itself.
+        if (chapterChanged && !continuePlaying) cancelBackgroundRetry(resetWaves = true)
 
         _mediaMetadata.value = TtsMediaMetadata(
             bookId = bookId,
@@ -1039,6 +1228,7 @@ class ReaderTtsManager(
 
         // Previously playing speech must stop before starting from the new paragraph.
         activeUtteranceId = null
+        pendingChapterAdvance = false
         try {
             ttsClient?.stop()
         } catch (e: Exception) {
@@ -1052,13 +1242,10 @@ class ReaderTtsManager(
         currentSubChunks = emptyList()
 
         _ttsState.value = TtsState.PLAYING
-        audioFocusManager.requestAudioFocus()
-        try {
-            val meta = _mediaMetadata.value
-            TtsPlaybackService.start(context.applicationContext, meta.bookId, meta.chapterId)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to start TtsPlaybackService", e)
-        }
+        // The playback service first: on Android 15+ audio focus needs a visible app or a running
+        // foreground service, and this may run from the background (chapter auto-advance).
+        startPlaybackService()
+        if (!acquireFocusOrWait()) return
         onPlaybackStarted?.invoke()
         notifyAndPersistPosition(
             _currentParagraphIndex.value,
@@ -1083,7 +1270,10 @@ class ReaderTtsManager(
         if (isExplicitUserAction) {
             audioFocusManager.clearTransientLoss()
         }
-        if (_ttsState.value == TtsState.PLAYING || _ttsState.value == TtsState.RECOVERING) {
+        val waitingForAutoRetry = _ttsState.value == TtsState.ERROR && _autoRetryPending.value
+        cancelBackgroundRetry(resetWaves = true)
+        if (waitingForAutoRetry) _errorMessage.value = null
+        if (_ttsState.value == TtsState.PLAYING || _ttsState.value == TtsState.RECOVERING || waitingForAutoRetry) {
             activeUtteranceId = null
             try {
                 ttsClient?.stop()
@@ -1107,14 +1297,17 @@ class ReaderTtsManager(
     fun resume() {
         if (isReleased) return
         if (_ttsState.value == TtsState.PAUSED) {
-            _ttsState.value = TtsState.PLAYING
-            audioFocusManager.requestAudioFocus()
-            try {
-                val meta = _mediaMetadata.value
-                TtsPlaybackService.start(context.applicationContext, meta.bookId, meta.chapterId)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to start TtsPlaybackService", e)
+            if (pendingChapterAdvance) {
+                // Paused at the end of a chapter because the next one wasn't translated: try again.
+                pendingChapterAdvance = false
+                _errorMessage.value = null
+                startPlaybackService()
+                handleChapterEnd(continuePlaying = true, isExplicitUserAction = true)
+                return
             }
+            _ttsState.value = TtsState.PLAYING
+            startPlaybackService()
+            if (!acquireFocusOrWait()) return
             onPlaybackStarted?.invoke()
             notifyAndPersistPosition(
                 _currentParagraphIndex.value,
@@ -1133,6 +1326,8 @@ class ReaderTtsManager(
     fun stop() {
         if (isReleased) return
         cancelWatchdog()
+        cancelBackgroundRetry(resetWaves = true)
+        pendingChapterAdvance = false
         playbackSessionEpoch++
         isAdvancingChapter.set(false)
         wasPlayingBeforeEngineReinit = false
@@ -1224,6 +1419,9 @@ class ReaderTtsManager(
      */
     fun setSpeechRate(rate: Float) {
         val clampedRate = rate.coerceIn(0.5f, 2.5f)
+        // Screens re-apply saved settings when they open; restarting the utterance for an unchanged
+        // rate made the current paragraph start over every time the reader was shown.
+        if (clampedRate == _speechRate.value) return
         _speechRate.value = clampedRate
         try {
             ttsClient?.setSpeechRate(clampedRate)
@@ -1239,8 +1437,9 @@ class ReaderTtsManager(
      * Selects and applies a TTS voice safely.
      */
     fun selectVoice(voiceInfo: TtsVoiceInfo) {
-        _selectedVoice.value = voiceInfo
         savedVoiceId = voiceInfo.id
+        if (_selectedVoice.value?.id == voiceInfo.id) return // Unchanged: don't restart the paragraph.
+        _selectedVoice.value = voiceInfo
         voiceInfo.voice?.let {
             try {
                 ttsClient?.setVoice(it)
@@ -1274,6 +1473,48 @@ class ReaderTtsManager(
 
     private var currentSubChunkIndex = 0
     private var currentSubChunks: List<String> = emptyList()
+
+    /** Paused at a chapter end because the next chapter isn't translated yet; Play tries again. */
+    private var pendingChapterAdvance = false
+
+    /** Offline-voice switches since the last successful utterance (network voices failing). */
+    private var networkFallbackCount = 0
+
+    private fun startPlaybackService() {
+        try {
+            val meta = _mediaMetadata.value
+            TtsPlaybackService.start(context.applicationContext, meta.bookId, meta.chapterId)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to start TtsPlaybackService", e)
+        }
+    }
+
+    /**
+     * Network voices fail with the screen off when the connection drops or Doze cuts network access.
+     * Switches to an installed offline voice (same locale first) for the rest of this engine session;
+     * the preferred voice comes back with the next engine start.
+     */
+    private fun switchToOfflineVoice(): Boolean {
+        if (networkFallbackCount >= 2) return false
+        val current = _selectedVoice.value
+        val candidates = _availableVoices.value.filter { candidate ->
+            !candidate.isNetworkRequired && candidate.id != current?.id &&
+                candidate.voice?.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) != true
+        }
+        val target = current?.let { cur ->
+            candidates.firstOrNull { it.locale == cur.locale }
+                ?: candidates.firstOrNull { it.locale.language == cur.locale.language }
+        } ?: candidates.firstOrNull() ?: return false
+        networkFallbackCount++
+        _selectedVoice.value = target
+        try {
+            target.voice?.let { ttsClient?.setVoice(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't apply offline voice ${target.id}", e)
+        }
+        AppDiagnostics.log("tts", "Network voice ${current?.id ?: "(default)"} failed; switched to offline voice ${target.id}")
+        return true
+    }
 
     private fun chunkLongText(text: String, maxChunkSize: Int = 2500): List<String> {
         if (text.length <= maxChunkSize) return listOf(text)
@@ -1431,6 +1672,8 @@ class ReaderTtsManager(
             currentSubChunkIndex = 0
             currentSubChunks = emptyList()
             reinitRetryCount = 0 // Utterance completed successfully; reset retry counter
+            backgroundRetryWave = 0
+            networkFallbackCount = 0
 
             val bookId = _mediaMetadata.value.bookId.ifBlank { null }
             var nextIndex = _currentParagraphIndex.value + 1
@@ -1510,7 +1753,7 @@ class ReaderTtsManager(
 
             launchSafe("handleChapterEnd") {
                 var loadError: Throwable? = null
-                val nextData = try {
+                var nextData = try {
                     provider.getNextChapterContent(bookId, chapterId)
                 } catch (e: CancellationException) {
                     isAdvancingChapter.set(false)
@@ -1521,8 +1764,32 @@ class ReaderTtsManager(
                     null
                 }
 
+                // Skip chapters with no text (covers, image pages) instead of reading a placeholder.
+                var skippedEmpty = 0
+                while (loadError == null && nextData != null && nextData.status == ChapterContentStatus.EMPTY &&
+                    skippedEmpty < MAX_EMPTY_CHAPTER_SKIPS
+                ) {
+                    skippedEmpty++
+                    val emptyId = nextData.nextChapterId
+                    nextData = try {
+                        provider.getNextChapterContent(bookId, emptyId)
+                    } catch (e: CancellationException) {
+                        isAdvancingChapter.set(false)
+                        throw e
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "Error loading chapter after empty chapter $emptyId", e)
+                        loadError = e
+                        null
+                    }
+                }
+
                 if (playbackSessionEpoch != currentEpoch || !isAdvancingChapter.get()) {
                     isAdvancingChapter.set(false)
+                    return@launchSafe
+                }
+
+                if (loadError == null && nextData != null && nextData.status == ChapterContentStatus.UNTRANSLATED) {
+                    pauseBeforeUntranslatedChapter(nextData)
                     return@launchSafe
                 }
 
@@ -1542,7 +1809,7 @@ class ReaderTtsManager(
                     return@launchSafe
                 }
 
-                if (nextData != null && nextData.paragraphs.isNotEmpty()) {
+                if (nextData != null && nextData.status == ChapterContentStatus.READY && nextData.paragraphs.isNotEmpty()) {
                     setChapterAndParagraphs(
                         chapterId = nextData.nextChapterId,
                         newParagraphs = nextData.paragraphs,
@@ -1562,7 +1829,11 @@ class ReaderTtsManager(
                     }
                 } else {
                     // Clean end of novel or no speakable content in next chapter
-                    _errorMessage.value = null
+                    _errorMessage.value = if (nextData?.status == ChapterContentStatus.MISSING) {
+                        "The book's file is missing, so the next chapter can't be read."
+                    } else {
+                        null
+                    }
                     stop()
                     notifyAndPersistPosition(
                         _currentParagraphIndex.value,
@@ -1592,6 +1863,31 @@ class ReaderTtsManager(
                 stop()
             }
         }
+    }
+
+    /**
+     * The next chapter has no finished translation. Reading its placeholder aloud and moving on used
+     * to race through every untranslated chapter to the end of the book, losing the listener's place.
+     * Instead playback pauses at the end of the current chapter; Play checks again.
+     */
+    private fun pauseBeforeUntranslatedChapter(next: ChapterTransitionData) {
+        isAdvancingChapter.set(false)
+        cancelWatchdog()
+        activeUtteranceId = null
+        pendingChapterAdvance = true
+        val title = next.nextChapterTitle.ifBlank { "The next chapter" }
+        _errorMessage.value = "$title isn't translated yet. Playback paused; press Play to try again."
+        _ttsState.value = TtsState.PAUSED
+        audioFocusManager.clearTransientLoss()
+        audioFocusManager.abandonAudioFocus()
+        notifyAndPersistPosition(
+            _currentParagraphIndex.value,
+            TtsState.PAUSED,
+            subChunkIndex = 0,
+            wasActivelyPlaying = false,
+            interruptionReason = TtsInterruptionReason.EXPLICIT_PAUSE
+        )
+        AppDiagnostics.log("tts", "Paused before untranslated chapter ${next.nextChapterId}")
     }
 
     private fun handlePreviousChapter() {
@@ -1715,10 +2011,16 @@ class ReaderTtsManager(
                     notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
                 }
                 TextToSpeech.ERROR_NETWORK, TextToSpeech.ERROR_NETWORK_TIMEOUT -> {
-                    _errorMessage.value = "Voice requires network connection"
-                    _ttsState.value = TtsState.ERROR
-                    audioFocusManager.abandonAudioFocus()
-                    notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
+                    AppDiagnostics.log("tts", "Network voice failed (network error) at paragraph ${_currentParagraphIndex.value}")
+                    if (switchToOfflineVoice()) {
+                        // Same paragraph again with an offline voice: nothing is skipped.
+                        speakCurrentParagraph(currentSubChunkIndex)
+                    } else if (!scheduleBackgroundRetry("network voice unavailable")) {
+                        _errorMessage.value = "Voice requires network connection"
+                        _ttsState.value = TtsState.ERROR
+                        audioFocusManager.abandonAudioFocus()
+                        notifyAndPersistPosition(_currentParagraphIndex.value, TtsState.ERROR)
+                    }
                 }
                 else -> {
                     Log.w(TAG, "Speech synthesis error ($errorCode) for paragraph ${_currentParagraphIndex.value}, advancing to next paragraph...")
@@ -1763,6 +2065,7 @@ class ReaderTtsManager(
         if (isReleased) return
         isReleased = true
         cancelWatchdog()
+        cancelBackgroundRetry(resetWaves = true)
         isEngineReady.set(false)
         isRecovering.set(false)
         isAdvancingChapter.set(false)

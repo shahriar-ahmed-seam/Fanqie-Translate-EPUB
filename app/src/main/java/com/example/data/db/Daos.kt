@@ -56,6 +56,10 @@ interface TranslationJobDao {
     @Query("UPDATE translation_jobs SET completedChunks = :completed, failedChunks = :failed, progress = :progress, status = :status, updatedAt = :timestamp WHERE id = :jobId")
     suspend fun updateJobProgress(jobId: String, completed: Int, failed: Int, progress: Float, status: String, timestamp: Long = System.currentTimeMillis())
 
+    /** Records the cached export file without touching status or updatedAt. */
+    @Query("UPDATE translation_jobs SET exportedUri = :path, exportedFileName = :fileName WHERE id = :jobId")
+    suspend fun setExportedFile(jobId: String, path: String, fileName: String)
+
     @Query("DELETE FROM translation_jobs WHERE id = :id")
     suspend fun deleteJobById(id: String)
 
@@ -79,6 +83,9 @@ interface ChapterDao {
 
     @Query("DELETE FROM chapters WHERE bookId = :bookId")
     suspend fun deleteChaptersByBook(bookId: String)
+
+    @Query("DELETE FROM chapters WHERE id = :id")
+    suspend fun deleteChapterById(id: String)
 }
 
 data class BookTitleTuple(

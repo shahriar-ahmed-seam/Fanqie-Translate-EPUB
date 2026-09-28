@@ -1,8 +1,11 @@
 name: Release APK
 
+# Builds a signed release on every push to main and publishes it twice: here (private source
+# repository) and in the public Fanqie-Translate-EPUB-releases repository, which is where the app's
+# in-app updater looks. Version = VERSION file (major.minor) + next free patch number.
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
@@ -12,12 +15,16 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  PUBLIC_RELEASES_REPO: shahriar-ahmed-seam/Fanqie-Translate-EPUB-releases
+  # SHA-256 of the release signing certificate every published APK must carry.
+  RELEASE_CERT_SHA256: 8f2c49316f82ef7579b6177a16a39572a7e0b219b4e0f3046ab7d5f05809d7b1
+
 jobs:
   release:
-    name: Build & Publish Release
+    name: Test, build, sign & publish
     runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,126 +46,117 @@ jobs:
 
       - name: Sanitize environment for CI
         run: |
-          # Strip local-machine trustStore if the path does not exist on this runner
-          LOCAL_CACERTS="/home/shahriar/.jdk/jdk-21/usr/lib/jvm/java-21-openjdk-amd64/lib/security/cacerts"
-          if [ ! -f "$LOCAL_CACERTS" ]; then
-            echo "Sanitizing gradle.properties for CI environment..."
-            sed -i 's|-Djavax.net.ssl.trustStore=[^ ]*||g' gradle.properties
-            sed -i 's|-Djavax.net.ssl.trustStorePassword=[^ ]*||g' gradle.properties
-            sed -i 's|-Djavax.net.ssl.trustStoreType=[^ ]*||g' gradle.properties
+          # Strip the local-machine trustStore from gradle.properties (path doesn't exist on the runner)
+          sed -i 's|-Djavax.net.ssl.trustStore=[^ ]*||g' gradle.properties
+          sed -i 's|-Djavax.net.ssl.trustStorePassword=[^ ]*||g' gradle.properties
+          sed -i 's|-Djavax.net.ssl.trustStoreType=[^ ]*||g' gradle.properties
+
+      - name: Check signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          missing=""
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD RELEASES_TOKEN; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing"
+            exit 1
           fi
 
-      - name: Determine next semantic version
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --no-daemon --no-configuration-cache
+
+      - name: Determine version
         id: versioning
         run: |
           git fetch --tags --force
-
-          # Find the latest release tag adhering to semver vX.Y.Z
-          LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
-
-          if [ -z "$LATEST_TAG" ]; then
-            MAJOR=1
-            MINOR=0
-            PATCH=0
-          else
-            CLEAN_VERSION=${LATEST_TAG#v}
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$CLEAN_VERSION"
-            MAJOR=${MAJOR:-1}
-            MINOR=${MINOR:-0}
-            PATCH=${PATCH:-0}
-            PATCH=$((PATCH + 1))
+          BASE=$(tr -d ' \r\n' < VERSION)
+          if ! echo "$BASE" | grep -Eq '^[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION must contain major.minor (found '$BASE')"
+            exit 1
           fi
+          MAJOR=${BASE%%.*}
+          MINOR=${BASE#*.}
+          LAST_PATCH=$(git tag -l "v${BASE}.*" | sed "s/^v${BASE}\.//" | grep -E '^[0-9]+$' | sort -n | tail -n 1)
+          if [ -z "$LAST_PATCH" ]; then PATCH=0; else PATCH=$((LAST_PATCH + 1)); fi
+          VERSION="${BASE}.${PATCH}"
+          # Same formula as app/build.gradle.kts; always above the old scheme's codes (v1.0.22 = 10022).
+          VERSION_CODE=$(( MAJOR * 1000000 + MINOR * 1000 + PATCH ))
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Target release: ${VERSION} (versionCode ${VERSION_CODE})"
 
-          # Prevent duplicate tags if tag exists locally or on remote
-          while git rev-parse -q --verify "refs/tags/v${MAJOR}.${MINOR}.${PATCH}" >/dev/null 2>&1 || \
-                git ls-remote --tags origin "refs/tags/v${MAJOR}.${MINOR}.${PATCH}" 2>/dev/null | grep -q "refs/tags/v${MAJOR}.${MINOR}.${PATCH}"; do
-            echo "Tag v${MAJOR}.${MINOR}.${PATCH} already exists. Incrementing patch..."
-            PATCH=$((PATCH + 1))
-          done
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
 
-          NEXT_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          TAG_NAME="v${NEXT_VERSION}"
-
-          # Monotonically increasing version code based on tag version and commit count
-          TOTAL_COMMITS=$(git rev-list --count HEAD 2>/dev/null || echo "1")
-          CALC_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
-          if [ "$CALC_CODE" -gt "$TOTAL_COMMITS" ]; then
-            VERSION_CODE=$CALC_CODE
-          else
-            VERSION_CODE=$TOTAL_COMMITS
-          fi
-          if [ "$VERSION_CODE" -le 0 ]; then
-            VERSION_CODE=1
-          fi
-
-          echo "version=${NEXT_VERSION}" >> $GITHUB_OUTPUT
-          echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
-          echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
-          echo "Target release: ${NEXT_VERSION} (versionCode: ${VERSION_CODE}, tag: ${TAG_NAME})"
-
-      - name: Build Release APK
+      - name: Build signed release APK
+        env:
+          SIGNING_STORE_FILE: ${{ runner.temp }}/release.keystore
+          SIGNING_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           ./gradlew assembleRelease --no-daemon --no-configuration-cache --no-build-cache \
             -PversionName="${{ steps.versioning.outputs.version }}" \
             -PversionCode="${{ steps.versioning.outputs.version_code }}"
 
-      - name: Verify APK and BuildConfig version
+      - name: Verify APK version and signature
         id: verify_apk
         run: |
-          # 1. Verify BuildConfig.java matches target version
-          BUILDCFG=$(find app/build/generated/source/buildConfig/release -name "BuildConfig.java" | head -n 1)
-          if [ -z "$BUILDCFG" ] || [ ! -f "$BUILDCFG" ]; then
-            echo "::error::BuildConfig.java was not generated during build"
+          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-unaligned.apk" ! -name "*unsigned*" | head -n 1)
+          if [ -z "$APK_FILE" ]; then
+            echo "::error::No signed release APK found in app/build/outputs/apk/release"
             exit 1
           fi
-          ACTUAL_VERSION=$(grep -o 'VERSION_NAME = "[^"]*"' "$BUILDCFG" | cut -d'"' -f2)
-          echo "Expected version: ${{ steps.versioning.outputs.version }}"
-          echo "BuildConfig actual version: ${ACTUAL_VERSION}"
-          if [ "$ACTUAL_VERSION" != "${{ steps.versioning.outputs.version }}" ]; then
-            echo "::error::Version mismatch! Expected ${{ steps.versioning.outputs.version }} but BuildConfig has ${ACTUAL_VERSION}"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK_FILE" > certs.txt
+          if ! grep -qi "SHA-256 digest: ${RELEASE_CERT_SHA256}" certs.txt; then
+            echo "::error::APK is not signed with the release key"
+            grep -i 'SHA-256 digest' certs.txt || true
             exit 1
           fi
-
-          # 2. Locate generated APK
-          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-unaligned.apk" | head -n 1)
-          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
-            echo "::error::Release APK was not found in app/build/outputs/apk/release"
-            exit 1
-          fi
-
-          # 3. Check minimum valid file size (> 1MB)
-          APK_SIZE=$(stat -c%s "$APK_FILE" 2>/dev/null || stat -f%z "$APK_FILE" 2>/dev/null || echo "0")
-          echo "Found APK: $APK_FILE (${APK_SIZE} bytes)"
-          if [ "$APK_SIZE" -lt 1000000 ]; then
-            echo "::error::APK file size ($APK_SIZE bytes) is suspiciously small or invalid"
-            exit 1
-          fi
-
-          # 4. Prepare release artifact with clean versioned name
-          RELEASE_APK="app/build/outputs/apk/release/EPUB-Translator-v${{ steps.versioning.outputs.version }}.apk"
+          BADGING=$("$BUILD_TOOLS/aapt2" dump badging "$APK_FILE" | head -n 1)
+          echo "$BADGING"
+          echo "$BADGING" | grep -q "versionCode='${{ steps.versioning.outputs.version_code }}'" || { echo "::error::versionCode mismatch"; exit 1; }
+          echo "$BADGING" | grep -q "versionName='${{ steps.versioning.outputs.version }}'" || { echo "::error::versionName mismatch"; exit 1; }
+          RELEASE_APK="app/build/outputs/apk/release/EPUB-Translator-${{ steps.versioning.outputs.tag }}.apk"
           cp "$APK_FILE" "$RELEASE_APK"
-          echo "apk_path=$RELEASE_APK" >> $GITHUB_OUTPUT
+          sha256sum "$RELEASE_APK"
+          echo "apk_path=$RELEASE_APK" >> "$GITHUB_OUTPUT"
 
-      - name: Create Git Tag
+      - name: Create git tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "${{ steps.versioning.outputs.tag }}" -m "Release ${{ steps.versioning.outputs.tag }}"
           git push origin "${{ steps.versioning.outputs.tag }}"
 
-      - name: Create GitHub Release and Attach APK
+      - name: Publish release (this repository)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.versioning.outputs.tag }}
           name: "EPUB Translator ${{ steps.versioning.outputs.tag }}"
-          body: |
-            ### EPUB Translator ${{ steps.versioning.outputs.tag }}
-
-            Official Production Release APK.
-            - Version: ${{ steps.versioning.outputs.version }}
-            - Version Code: ${{ steps.versioning.outputs.version_code }}
+          body_path: RELEASE_NOTES.md
           files: ${{ steps.verify_apk.outputs.apk_path }}
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release (public releases repository, used by in-app updates)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          gh release create "${{ steps.versioning.outputs.tag }}" "${{ steps.verify_apk.outputs.apk_path }}" \
+            --repo "$PUBLIC_RELEASES_REPO" \
+            --title "EPUB Translator ${{ steps.versioning.outputs.tag }}" \
+            --notes-file RELEASE_NOTES.md \
+            --latest

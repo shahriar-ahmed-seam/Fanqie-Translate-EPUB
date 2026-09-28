@@ -21,6 +21,9 @@ class TomatoMTLProvider(
     override val name: String = "TomatoMTL (Google Engine)"
 
     companion object {
+        /** Longest text sent in one request; the chunk size setting can't exceed it. */
+        const val MAX_REQUEST_CHARS = 4200
+
         @Volatile
         private var rateLimitUntil = 0L
 
@@ -68,7 +71,7 @@ class TomatoMTLProvider(
         val tl = if (targetLang.isBlank()) "en" else targetLang
 
         // If chunk is unexpectedly large (> 4200 chars), split by paragraph boundaries safely
-        if (text.length > 4200) {
+        if (text.length > MAX_REQUEST_CHARS) {
             val paragraphs = text.split("\n\n")
             val translatedParagraphs = mutableListOf<String>()
             var currentBatch = StringBuilder()

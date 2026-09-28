@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -16,6 +17,7 @@ import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -27,14 +29,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.scraper.ScraperGraph
+import com.example.scraper.ui.ScraperRoot
+import com.example.scraper.ui.ScraperScreen
+import com.example.scraper.ui.ScraperViewModel
 import com.example.queue.ImportProgress
+import com.example.tts.TtsPlaybackService
 import com.example.ui.*
 import com.example.ui.theme.MyApplicationTheme
 import java.io.File
 
+/** Job states that count as "in the queue" for the Queue tab badge (workers set RUNNING while translating). */
+val ACTIVE_JOB_STATUSES = setOf("QUEUED", "RUNNING", "TRANSLATING", "PAUSING")
+
 enum class Screen(val title: String) {
     HOME("Home"),
     LIBRARY("Library"),
+    SCRAPER("Scraper"),
     QUEUE("Queue"),
     SETTINGS("Settings")
 }
@@ -44,6 +56,8 @@ class MainActivity : ComponentActivity() {
 
     val pendingNotificationBookId = mutableStateOf<String?>(null)
     val pendingNotificationChapterId = mutableStateOf<String?>(null)
+    /** Set when the scraper's notification is tapped. */
+    val pendingOpenScraper = mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -53,11 +67,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val bId = intent?.getStringExtra("extra_open_book_id")
-        val cId = intent?.getStringExtra("extra_open_chapter_id")
-        if (bId != null && cId != null) {
-            pendingNotificationBookId.value = bId
-            pendingNotificationChapterId.value = cId
+        // A recreated activity (process death, rotation) or a relaunch from Recents gets the ORIGINAL
+        // launch intent again; its extras point at wherever TTS was hours ago. Only a fresh launch counts.
+        val launchedFromHistory = ((intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (savedInstanceState == null && !launchedFromHistory) {
+            handleOpenIntent(intent)
+        } else {
+            consumeOpenExtras(intent)
         }
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -70,21 +86,56 @@ class MainActivity : ComponentActivity() {
                 MainApp(
                     viewModel = viewModel,
                     pendingNotificationBookId = pendingNotificationBookId,
-                    pendingNotificationChapterId = pendingNotificationChapterId
+                    pendingNotificationChapterId = pendingNotificationChapterId,
+                    pendingOpenScraper = pendingOpenScraper
                 )
             }
         }
     }
 
-    override fun onNewIntent(intent: android.content.Intent) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        val bId = intent.getStringExtra("extra_open_book_id")
-        val cId = intent.getStringExtra("extra_open_chapter_id")
-        if (bId != null && cId != null) {
-            pendingNotificationBookId.value = bId
-            pendingNotificationChapterId.value = cId
+        handleOpenIntent(intent)
+    }
+
+    private fun handleOpenIntent(intent: Intent?) {
+        if (intent == null) return
+        val opensTtsSession = intent.getBooleanExtra(TtsPlaybackService.EXTRA_OPEN_TTS_SESSION, false)
+        val bId = intent.getStringExtra(TtsPlaybackService.EXTRA_OPEN_BOOK_ID)
+        val cId = intent.getStringExtra(TtsPlaybackService.EXTRA_OPEN_CHAPTER_ID)
+        val target = if (opensTtsSession) resolveTtsSessionTarget(bId, cId) else if (bId != null && cId != null) bId to cId else null
+        if (target != null) {
+            pendingNotificationBookId.value = target.first
+            pendingNotificationChapterId.value = target.second
         }
+        if (intent.getBooleanExtra(ScraperGraph.EXTRA_OPEN_SCRAPER, false)) {
+            pendingOpenScraper.value = true
+        }
+        consumeOpenExtras(intent)
+    }
+
+    /**
+     * Where the listener is right now, resolved when the notification is tapped rather than when it
+     * was built: the live session first, then the saved checkpoint, then what the intent carried.
+     */
+    private fun resolveTtsSessionTarget(fallbackBookId: String?, fallbackChapterId: String?): Pair<String, String>? {
+        val app = application as? TranslatorApplication
+        val manager = app?.ttsManager
+        val meta = manager?.mediaMetadata?.value
+        if (manager != null && manager.hasActiveSession() && meta != null) return meta.bookId to meta.chapterId
+        val session = app?.settingsRepository?.getTtsSessionState()
+        if (session != null && session.bookId.isNotBlank() && session.chapterId.isNotBlank()) {
+            return session.bookId to session.chapterId
+        }
+        return if (fallbackBookId != null && fallbackChapterId != null) fallbackBookId to fallbackChapterId else null
+    }
+
+    private fun consumeOpenExtras(intent: Intent?) {
+        intent?.removeExtra(TtsPlaybackService.EXTRA_OPEN_TTS_SESSION)
+        intent?.removeExtra(TtsPlaybackService.EXTRA_OPEN_BOOK_ID)
+        intent?.removeExtra(TtsPlaybackService.EXTRA_OPEN_CHAPTER_ID)
+        intent?.removeExtra(ScraperGraph.EXTRA_OPEN_SCRAPER)
     }
 }
 
@@ -92,38 +143,56 @@ class MainActivity : ComponentActivity() {
 fun MainApp(
     viewModel: MainViewModel,
     pendingNotificationBookId: MutableState<String?>? = null,
-    pendingNotificationChapterId: MutableState<String?>? = null
+    pendingNotificationChapterId: MutableState<String?>? = null,
+    pendingOpenScraper: MutableState<Boolean>? = null
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as? TranslatorApplication
     val settingsRepo = remember { app?.settingsRepository ?: com.example.data.repository.SettingsRepository(context) }
     val ttsManager = remember { app?.ttsManager }
 
+    val liveTtsMeta = ttsManager?.takeIf { it.hasActiveSession() }?.mediaMetadata?.value
+
     val initialBookId = remember {
         val intentBook = pendingNotificationBookId?.value
-            ?: (context as? ComponentActivity)?.intent?.getStringExtra("extra_open_book_id")
-        val activeTtsBook = ttsManager?.mediaMetadata?.value?.bookId?.takeIf { it.isNotBlank() }
+        val activeTtsBook = liveTtsMeta?.bookId?.takeIf { it.isNotBlank() }
         val sessionState = if (settingsRepo.isTtsAutoResumePlaybackEnabled()) settingsRepo.getTtsSessionState() else null
         val autoResumeBook = sessionState?.bookId?.takeIf { it.isNotBlank() }
         val lastBook = settingsRepo.getLastActiveBookId()
         intentBook ?: activeTtsBook ?: autoResumeBook ?: lastBook
     }
 
-    val initialChapterId = remember {
-        val intentChapter = pendingNotificationChapterId?.value
-            ?: (context as? ComponentActivity)?.intent?.getStringExtra("extra_open_chapter_id")
-        val activeTtsChapter = ttsManager?.mediaMetadata?.value?.chapterId?.takeIf { it.isNotBlank() }
-        val sessionState = if (settingsRepo.isTtsAutoResumePlaybackEnabled()) settingsRepo.getTtsSessionState() else null
-        val autoResumeChapter = sessionState?.chapterId?.takeIf { it.isNotBlank() }
-        val targetBook = initialBookId
-        val lastChapter = targetBook?.let { settingsRepo.getLastReadChapterId(it) }
-        intentChapter ?: activeTtsChapter ?: autoResumeChapter ?: lastChapter
-    }
-
     var currentScreen by rememberSaveable { mutableStateOf(Screen.HOME) }
     var selectedBookIdForDetail by rememberSaveable { mutableStateOf<String?>(null) }
     var activeReaderBookId by rememberSaveable { mutableStateOf(initialBookId) }
-    var activeReaderChapterId by rememberSaveable { mutableStateOf(initialChapterId) }
+    // Deliberately not saveable: a chapter restored from saved UI state can be hours behind the TTS
+    // session (it kept advancing with the screen off). Resolved from the newest data instead:
+    // an explicit request, the live session, then the progress saved for that book.
+    var activeReaderChapterId by remember {
+        mutableStateOf(
+            activeReaderBookId?.let { bookId ->
+                pendingNotificationChapterId?.value?.takeIf { pendingNotificationBookId?.value == bookId }
+                    ?: liveTtsMeta?.takeIf { it.bookId == bookId }?.chapterId?.takeIf { it.isNotBlank() }
+                    ?: settingsRepo.getLastReadChapterId(bookId)
+            }
+        )
+    }
+
+    val scraperViewModel: ScraperViewModel = viewModel()
+    val scraperScreen by scraperViewModel.screen.collectAsStateWithLifecycle()
+    // The browser needs the whole screen, so the bottom bar hides while it's open.
+    val scraperFullScreen = currentScreen == Screen.SCRAPER && scraperScreen == ScraperScreen.Browser
+
+    LaunchedEffect(pendingOpenScraper?.value) {
+        if (pendingOpenScraper?.value == true) {
+            activeReaderBookId = null
+            activeReaderChapterId = null
+            selectedBookIdForDetail = null
+            currentScreen = Screen.SCRAPER
+            scraperViewModel.openBrowser()
+            pendingOpenScraper.value = false
+        }
+    }
 
     // Handle new intent notification click while activity is alive
     LaunchedEffect(pendingNotificationBookId?.value, pendingNotificationChapterId?.value) {
@@ -150,7 +219,6 @@ fun MainApp(
     val libraryViewMode by viewModel.libraryViewMode.collectAsStateWithLifecycle()
     val previewState by viewModel.previewState.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
-    val updateProgress by viewModel.updateProgress.collectAsStateWithLifecycle()
     val importProgress by viewModel.importProgress.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
@@ -211,7 +279,7 @@ fun MainApp(
             modifier = Modifier.fillMaxSize(),
             snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
-                NavigationBar(modifier = Modifier.testTag("bottom_nav_bar")) {
+                if (!scraperFullScreen) NavigationBar(modifier = Modifier.testTag("bottom_nav_bar")) {
                     NavigationBarItem(
                         selected = currentScreen == Screen.HOME,
                         onClick = { currentScreen = Screen.HOME },
@@ -227,12 +295,28 @@ fun MainApp(
                         modifier = Modifier.testTag("nav_library")
                     )
                     NavigationBarItem(
+                        selected = currentScreen == Screen.SCRAPER,
+                        onClick = {
+                            // Tapping the tab again returns to the scraper's first screen.
+                            if (currentScreen == Screen.SCRAPER) scraperViewModel.goHome()
+                            currentScreen = Screen.SCRAPER
+                        },
+                        icon = {
+                            val scraping by scraperViewModel.progress.collectAsStateWithLifecycle()
+                            BadgedBox(badge = { if (scraping.status.isActive) Badge() }) {
+                                Icon(Icons.Default.TravelExplore, contentDescription = "Scraper")
+                            }
+                        },
+                        label = { Text("Scraper") },
+                        modifier = Modifier.testTag("nav_scraper")
+                    )
+                    NavigationBarItem(
                         selected = currentScreen == Screen.QUEUE,
                         onClick = { currentScreen = Screen.QUEUE },
                         icon = {
                             BadgedBox(
                                 badge = {
-                                    val activeCount = booksWithJobs.count { it.job?.status == "TRANSLATING" || it.job?.status == "QUEUED" }
+                                    val activeCount = booksWithJobs.count { it.job?.status in ACTIVE_JOB_STATUSES }
                                     if (activeCount > 0) {
                                         Badge { Text("$activeCount") }
                                     }
@@ -304,11 +388,21 @@ fun MainApp(
                         onCancelJob = { viewModel.cancelJob(it) },
                         onExportEpub = onExport
                     )
+                    Screen.SCRAPER -> ScraperRoot(
+                        viewModel = scraperViewModel,
+                        modifier = Modifier.consumeWindowInsets(innerPadding),
+                        onOpenLibraryBook = { bookId -> selectedBookIdForDetail = bookId }
+                    )
                     Screen.SETTINGS -> SettingsScreen(
                         settings = settings,
                         onSaveSettings = { viewModel.updateSettings(it) },
                         onCheckForUpdates = { viewModel.checkForUpdates(silent = false) },
-                        viewModel = viewModel
+                        viewModel = viewModel,
+                        onOpenScraperSettings = {
+                            scraperViewModel.goHome()
+                            scraperViewModel.open(ScraperScreen.Settings)
+                            currentScreen = Screen.SCRAPER
+                        }
                     )
                 }
             }
@@ -326,12 +420,39 @@ fun MainApp(
     }
 
     // In-App Update Dialog
-    updateState?.let { releaseInfo ->
+    updateState?.let { update ->
+        // Re-checked on every composition: the user may have just allowed installs in Settings.
+        var canInstall by remember { mutableStateOf(viewModel.updateManager.canInstallPackages()) }
+        val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    canInstall = viewModel.updateManager.canInstallPackages()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
         UpdateDialog(
-            releaseInfo = releaseInfo,
-            downloadProgress = updateProgress,
+            state = update,
+            canInstallPackages = canInstall,
             onDismiss = { viewModel.dismissUpdateDialog() },
-            onDownload = { downloadUrl -> viewModel.startApkDownload(downloadUrl) }
+            onDownload = { viewModel.startUpdateDownload() },
+            onInstall = { apk ->
+                val activity = context as? android.app.Activity
+                when {
+                    activity == null -> viewModel.onUpdateInstallFailed("Couldn't open the installer.")
+                    !viewModel.updateManager.canInstallPackages() -> {
+                        if (!viewModel.updateManager.openInstallPermissionSettings(activity)) {
+                            viewModel.onUpdateInstallFailed(
+                                "Allow \"Install unknown apps\" for Fanqie Translate in Android Settings, then try again."
+                            )
+                        }
+                    }
+                    !viewModel.updateManager.launchInstaller(activity, apk) ->
+                        viewModel.onUpdateInstallFailed("Couldn't open the Android installer. Please try again.")
+                }
+            }
         )
     }
 

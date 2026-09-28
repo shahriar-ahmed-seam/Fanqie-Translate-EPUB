@@ -371,64 +371,97 @@ object EpubRebuilder {
         val doc = Jsoup.parse(rawXhtml, "", Parser.htmlParser())
         doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml).charset(Charsets.UTF_8)
 
-        // 1. Update Title and Heading
+        // 1. Body first (element texts must still be the source text to be matched), title last.
+        // 2. Pair each body chunk's source paragraphs with its translated paragraphs.
+        val bodyChunks = chapterChunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
+        val groups = bodyChunks.map { chunk ->
+            splitParagraphs(chunk.sourceText) to
+                splitParagraphs(chunk.translatedText?.takeIf { it.isNotBlank() } ?: chunk.sourceText)
+        }
+        val sourceParagraphs = groups.flatMap { it.first }
+
+        if (sourceParagraphs.isNotEmpty()) {
+            // 3. Find the elements the paragraphs were taken from at import time and replace their text
+            //    chunk by chunk, so a translation that merged or split paragraphs only affects its own chunk.
+            val elements = matchImportedBlocks(doc, sourceParagraphs)
+            if (elements != null) {
+                var offset = 0
+                for ((source, translated) in groups) {
+                    applyTranslation(elements.subList(offset, offset + source.size), translated, doc)
+                    offset += source.size
+                }
+            } else {
+                // The chapter file doesn't match what was imported: fill body text blocks in order
+                // (headings keep their own title translation, media blocks are left alone).
+                val blocks = EpubParser.textBlockElements(doc).filter {
+                    it.normalName() !in HEADING_TAGS && it.select("img, svg, image").isEmpty()
+                }
+                val translated = groups.flatMap { it.second }
+                if (blocks.isNotEmpty()) {
+                    applyTranslation(blocks, translated, doc)
+                } else {
+                    // Text without block tags (<br>/<div> layout): drop the source text, keep images.
+                    removeTextContent(doc.body())
+                    translated.forEach { doc.body().appendElement("p").text(it) }
+                }
+            }
+        }
+
+        // 4. The dedicated chapter-title translation wins over the heading's body translation.
         if (translatedTitle.isNotBlank()) {
             doc.title(translatedTitle)
-            val heading = doc.select("h1, h2, h3, .chapter-title, .title").firstOrNull { it.text().isNotBlank() }
-            if (heading != null) {
-                heading.text(translatedTitle)
-            }
-        }
-
-        // 2. Collect translated body paragraphs
-        val bodyChunks = chapterChunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
-        val translatedParagraphs = mutableListOf<String>()
-
-        for (chunk in bodyChunks) {
-            val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: chunk.sourceText
-            val parts = text.split(Regex("\n\n+"))
-            for (p in parts) {
-                val trimmed = p.trim()
-                if (trimmed.isNotBlank()) {
-                    translatedParagraphs.add(trimmed)
-                }
-            }
-        }
-
-        // 3. Replace text in content paragraph elements without destroying images/media
-        // Separate pure text elements from media elements (e.g. elements containing <img>, <svg>, <image>)
-        val candidateElements = doc.select("p, blockquote, li, dt, dd")
-        val contentElements = candidateElements.filter { element ->
-            element.select("img, svg, image").isEmpty()
-        }
-
-        if (contentElements.isNotEmpty() && translatedParagraphs.isNotEmpty()) {
-            val limit = minOf(contentElements.size, translatedParagraphs.size)
-            for (i in 0 until limit) {
-                contentElements[i].text(translatedParagraphs[i])
-            }
-
-            // If translated text generated more paragraphs than existing elements, append them
-            if (translatedParagraphs.size > contentElements.size) {
-                val targetContainer = contentElements.lastOrNull()?.parent() ?: doc.body()
-                for (i in contentElements.size until translatedParagraphs.size) {
-                    targetContainer.appendElement("p").text(translatedParagraphs[i])
-                }
-            } else if (contentElements.size > translatedParagraphs.size) {
-                // If translation produced fewer paragraphs than source elements,
-                // remove remaining surplus content elements so untranslated source Chinese text does not leak!
-                for (i in translatedParagraphs.size until contentElements.size) {
-                    contentElements[i].remove()
-                }
-            }
-        } else if (translatedParagraphs.isNotEmpty()) {
-            // If there are no existing pure text elements, append without destroying images/illustrations
-            for (p in translatedParagraphs) {
-                doc.body().appendElement("p").text(p)
-            }
+            doc.select("h1, h2, h3, .chapter-title, .title").firstOrNull { it.text().isNotBlank() }?.text(translatedTitle)
         }
 
         return doc.html()
+    }
+
+    private val HEADING_TAGS = setOf("h1", "h2", "h3", "h4", "h5", "h6")
+
+    private fun splitParagraphs(text: String): List<String> =
+        text.split(Regex("\n\n+")).map { it.trim() }.filter { it.isNotBlank() }
+
+    private fun normalized(text: String) = text.replace(Regex("\\s+"), " ").trim()
+
+    /**
+     * The element list whose texts are exactly the paragraphs stored at import: the current block
+     * selection, or the one older versions used. Null when the chapter no longer matches.
+     */
+    internal fun matchImportedBlocks(doc: Document, sourceParagraphs: List<String>): List<org.jsoup.nodes.Element>? {
+        val expected = sourceParagraphs.map(::normalized)
+        val candidates = listOf(EpubParser.textBlockElements(doc), EpubParser.legacyBlockElements(doc))
+        candidates.firstOrNull { list -> list.map { normalized(it.text()) } == expected }?.let { return it }
+        return candidates.firstOrNull { it.size == expected.size }
+    }
+
+    /** Puts [translated] into [elements] in order; extra paragraphs become new <p> siblings, surplus elements are removed. */
+    private fun applyTranslation(elements: List<org.jsoup.nodes.Element>, translated: List<String>, doc: Document) {
+        if (elements.isEmpty()) {
+            translated.forEach { doc.body().appendElement("p").text(it) }
+            return
+        }
+        val common = minOf(elements.size, translated.size)
+        for (i in 0 until common) elements[i].text(translated[i])
+        if (translated.size > elements.size) {
+            var anchor = elements.last()
+            for (i in elements.size until translated.size) {
+                val p = org.jsoup.nodes.Element("p").text(translated[i])
+                anchor.after(p)
+                anchor = p
+            }
+        } else {
+            // Fewer translated paragraphs than source blocks: remove the rest so no source text leaks.
+            for (i in translated.size until elements.size) elements[i].remove()
+        }
+    }
+
+    private fun removeTextContent(root: org.jsoup.nodes.Element) {
+        root.select("br").remove()
+        val textNodes = mutableListOf<org.jsoup.nodes.TextNode>()
+        org.jsoup.select.NodeTraversor.traverse({ node, _ ->
+            if (node is org.jsoup.nodes.TextNode && node.text().isNotBlank()) textNodes += node
+        }, root)
+        textNodes.forEach { it.remove() }
     }
 
     private fun rebuildOpfXml(

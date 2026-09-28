@@ -16,11 +16,13 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.TranslatorApplication
-import com.example.data.repository.SettingsRepository
 import com.example.data.repository.TtsPlaybackSessionState
+import com.example.diagnostics.AppDiagnostics
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +38,10 @@ import kotlinx.coroutines.launch
 /**
  * Dedicated foreground service managing Android background audio playback for Reader TTS.
  * Integrates with MediaSessionCompat for lock screen and system media controls.
+ *
+ * It mirrors [ReaderTtsManager]: the manager owns playback state and is the only writer of the saved
+ * position; this service keeps the process in the foreground, the CPU awake while playback is wanted,
+ * and the notification / media session up to date.
  */
 class TtsPlaybackService : Service() {
 
@@ -45,15 +51,20 @@ class TtsPlaybackService : Service() {
     private var mediaSession: MediaSessionCompat? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var observationJob: Job? = null
+    private var wakeLockRenewJob: Job? = null
     private val isRestoringSession = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** Most recent start request; stopping with it can't cancel a start that is still on its way. */
+    @Volatile
+    private var lastStartId = 0
 
     private val wakeLockSync = Any()
-    private val WAKELOCK_TIMEOUT_MS = 10 * 60 * 1000L // 10 minutes safely renewable timeout
 
     /**
-     * Centralized WakeLock management:
-     * While actively playing, safely renews the timeout to prevent OEM killing or abandonment drain.
-     * When playback stops or pauses, immediately releases the WakeLock.
+     * Centralized WakeLock management. Held for the whole time playback is wanted (speaking, engine
+     * recovery, chapter loading, automatic retries, short interruptions), not only while PLAYING:
+     * without it the phone slept during a recovery and playback never came back with the screen off.
+     * The timeout is re-armed on every progress update and every minute; released as soon as the
+     * session is idle, paused by the user, or stopped.
      */
     private fun manageWakeLock(shouldHold: Boolean) {
         synchronized(wakeLockSync) {
@@ -62,12 +73,9 @@ class TtsPlaybackService : Service() {
                 if (shouldHold) {
                     // setReferenceCounted(false) ensures acquire(timeout) renews without stacking counts
                     lock.acquire(WAKELOCK_TIMEOUT_MS)
-                    Log.d(TAG, "WakeLock acquired/renewed with ${WAKELOCK_TIMEOUT_MS / 60000}m timeout")
-                } else {
-                    if (lock.isHeld) {
-                        lock.release()
-                        Log.d(TAG, "WakeLock released")
-                    }
+                } else if (lock.isHeld) {
+                    lock.release()
+                    Log.d(TAG, "WakeLock released")
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "Error managing WakeLock (shouldHold=$shouldHold)", e)
@@ -78,6 +86,8 @@ class TtsPlaybackService : Service() {
     companion object {
         const val CHANNEL_ID = "epub_tts_channel"
         const val NOTIFICATION_ID = 1002
+        /** "Playback stopped, tap to resume" after Android refused a background restart. */
+        const val RESUME_NOTIFICATION_ID = 1003
 
         const val ACTION_START = "com.example.tts.ACTION_START"
         const val ACTION_PLAY = "com.example.tts.ACTION_PLAY"
@@ -90,42 +100,49 @@ class TtsPlaybackService : Service() {
         const val EXTRA_BOOK_ID = "extra_book_id"
         const val EXTRA_CHAPTER_ID = "extra_chapter_id"
 
-        fun start(context: Context, bookId: String? = null, chapterId: String? = null) {
+        /** Set on intents that should open the reader at the live TTS position (resolved on arrival). */
+        const val EXTRA_OPEN_TTS_SESSION = "extra_open_tts_session"
+        const val EXTRA_OPEN_BOOK_ID = "extra_open_book_id"
+        const val EXTRA_OPEN_CHAPTER_ID = "extra_open_chapter_id"
+
+        private const val WAKELOCK_TIMEOUT_MS = 10 * 60 * 1000L
+        private const val WAKELOCK_RENEW_INTERVAL_MS = 60 * 1000L
+
+        /** Starts (or updates) the foreground service. Never throws; false if Android refused. */
+        fun start(context: Context, bookId: String? = null, chapterId: String? = null): Boolean {
             val intent = Intent(context, TtsPlaybackService::class.java).apply {
                 action = ACTION_START
                 if (bookId != null) putExtra(EXTRA_BOOK_ID, bookId)
                 if (chapterId != null) putExtra(EXTRA_CHAPTER_ID, chapterId)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            return startForegroundCompat(context, intent)
         }
 
-        fun play(context: Context) {
-            val intent = Intent(context, TtsPlaybackService::class.java).apply {
-                action = ACTION_PLAY
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+        fun play(context: Context): Boolean =
+            startForegroundCompat(context, Intent(context, TtsPlaybackService::class.java).setAction(ACTION_PLAY))
+
+        fun pause(context: Context): Boolean =
+            startPlain(context, Intent(context, TtsPlaybackService::class.java).setAction(ACTION_PAUSE))
+
+        fun stop(context: Context): Boolean =
+            startPlain(context, Intent(context, TtsPlaybackService::class.java).setAction(ACTION_STOP))
+
+        private fun startForegroundCompat(context: Context, intent: Intent): Boolean = try {
+            ContextCompat.startForegroundService(context, intent)
+            true
+        } catch (e: Exception) {
+            // ForegroundServiceStartNotAllowedException (Android 12+ from the background), IllegalStateException.
+            Log.w("TtsPlaybackService", "Playback service start refused", e)
+            AppDiagnostics.log("service", "Playback service start refused: ${e.javaClass.simpleName}: ${e.message}")
+            false
         }
 
-        fun pause(context: Context) {
-            val intent = Intent(context, TtsPlaybackService::class.java).apply {
-                action = ACTION_PAUSE
-            }
+        private fun startPlain(context: Context, intent: Intent): Boolean = try {
             context.startService(intent)
-        }
-
-        fun stop(context: Context) {
-            val intent = Intent(context, TtsPlaybackService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            true
+        } catch (e: Exception) {
+            Log.w("TtsPlaybackService", "Playback service command refused", e)
+            false
         }
     }
 
@@ -202,10 +219,6 @@ class TtsPlaybackService : Service() {
                 override fun onStop() {
                     ttsManager?.stop()
                     stopServiceSafely()
-                }
-
-                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
-                    return super.onMediaButtonEvent(mediaButtonEvent)
                 }
             })
             setMediaButtonReceiver(mediaButtonPendingIntent)
@@ -284,6 +297,7 @@ class TtsPlaybackService : Service() {
                 targetState = targetState
             )
             Log.i(TAG, "Restored TTS session for book ${session.bookId}, chapter ${session.chapterId}, para ${session.paragraphIndex}, subChunk $subChunk, autoPlay=$autoPlay, targetState=$targetState")
+            AppDiagnostics.log("service", "Restored session at chapter ${session.chapterId}, paragraph ${session.paragraphIndex} (autoPlay=$autoPlay)")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to restore TTS session from repository", e)
         } finally {
@@ -308,8 +322,16 @@ class TtsPlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
+        // Every startForegroundService() must be answered with startForeground() before anything else
+        // (including stopping); a start that reached an already running service used to go unanswered.
+        val inForeground = startInForeground()
+
         val app = applicationContext as? TranslatorApplication
-        val ttsManager = app?.ttsManager ?: return START_NOT_STICKY
+        val ttsManager = app?.ttsManager ?: run {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
 
         if (intent != null) {
             androidx.media.session.MediaButtonReceiver.handleIntent(mediaSession, intent)
@@ -355,41 +377,62 @@ class TtsPlaybackService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_START -> {
-                // Ensure service is running in foreground
-                updateNotification(ttsManager)
+                // Already answered with startForeground() above.
             }
-            null -> {
-                // Recover from process recreation (START_STICKY restarted service with null intent)
-                Log.i(TAG, "TtsPlaybackService restarted with null intent. Checking session recovery...")
-                val session = app.settingsRepository.getTtsSessionState()
-                if (session == null || session.interruptionReason == TtsInterruptionReason.EXPLICIT_STOP || session.playbackState == "STOPPED") {
-                    Log.i(TAG, "Session was explicitly stopped or absent. Stopping recreated service.")
-                    stopServiceSafely()
-                    return START_NOT_STICKY
-                }
-
-                val shouldResumePlayback = session.wasActivelyPlaying &&
-                    session.interruptionReason == TtsInterruptionReason.UNEXPECTED_INTERRUPTION
-
-                if (shouldResumePlayback) {
-                    serviceScope.launch {
-                        restoreSessionIfPossible(app, autoPlay = true)
-                    }
-                } else if (session.playbackState == "PAUSED" || session.interruptionReason == TtsInterruptionReason.EXPLICIT_PAUSE) {
-                    serviceScope.launch {
-                        restoreSessionIfPossible(app, autoPlay = false)
-                    }
-                } else {
-                    stopServiceSafely()
-                    return START_NOT_STICKY
-                }
-            }
+            null -> return handleSystemRestart(app, ttsManager, inForeground)
         }
 
         return START_STICKY
     }
 
-    private fun startInForeground() {
+    /**
+     * Android restarted the service after the process died (START_STICKY, null intent). Resume only
+     * what was really playing, and only if Android let the service back into the foreground; playing
+     * without it gets cut off again within a minute, so offer a one-tap resume instead.
+     */
+    private fun handleSystemRestart(app: TranslatorApplication, ttsManager: ReaderTtsManager, inForeground: Boolean): Int {
+        Log.i(TAG, "TtsPlaybackService restarted with null intent. Checking session recovery...")
+        val session = app.settingsRepository.getTtsSessionState()
+        if (session == null || session.interruptionReason == TtsInterruptionReason.EXPLICIT_STOP || session.playbackState == "STOPPED") {
+            Log.i(TAG, "Session was explicitly stopped or absent. Stopping recreated service.")
+            stopServiceSafely()
+            return START_NOT_STICKY
+        }
+        if (ttsManager.hasActiveSession()) {
+            // The process survived; the manager still has the session.
+            return START_STICKY
+        }
+
+        val shouldResumePlayback = session.wasActivelyPlaying &&
+            session.interruptionReason == TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+        AppDiagnostics.log(
+            "service",
+            "Restarted by Android after the process ended (was playing=$shouldResumePlayback, foreground allowed=$inForeground)"
+        )
+
+        if (shouldResumePlayback && !inForeground) {
+            postResumeNotification()
+            stopServiceSafely()
+            return START_NOT_STICKY
+        }
+
+        if (shouldResumePlayback) {
+            serviceScope.launch {
+                restoreSessionIfPossible(app, autoPlay = true)
+            }
+        } else if (session.playbackState == "PAUSED" || session.interruptionReason == TtsInterruptionReason.EXPLICIT_PAUSE) {
+            serviceScope.launch {
+                restoreSessionIfPossible(app, autoPlay = false)
+            }
+        } else {
+            stopServiceSafely()
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
+
+    /** Returns false when Android refused to (re)enter the foreground. */
+    private fun startInForeground(): Boolean {
         val app = applicationContext as? TranslatorApplication
         val ttsManager = app?.ttsManager
         val initialNotification = buildNotification(
@@ -402,54 +445,29 @@ class TtsPlaybackService : Service() {
             chapterId = ttsManager?.mediaMetadata?.value?.chapterId ?: ""
         )
 
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    initialNotification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, initialNotification)
-            }
+        return try {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                initialNotification,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK else 0
+            )
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start service in foreground", e)
+            AppDiagnostics.log("service", "startForeground refused: ${e.javaClass.simpleName}: ${e.message}")
+            false
         }
     }
 
     private fun observeTtsManager() {
         val app = applicationContext as? TranslatorApplication ?: return
         val ttsManager = app.ttsManager
-        val settingsRepo = app.settingsRepository
-        val database = app.database
 
-        // Automatic position persistence hook
-        ttsManager.onPositionChanged = { paraIndex, state ->
-            val meta = ttsManager.mediaMetadata.value
-            if (meta.bookId.isNotBlank() && meta.chapterId.isNotBlank()) {
-                settingsRepo.saveTtsSessionState(
-                    TtsPlaybackSessionState(
-                        bookId = meta.bookId,
-                        chapterId = meta.chapterId,
-                        chapterOrder = meta.chapterOrder,
-                        paragraphIndex = paraIndex,
-                        subChunkIndex = ttsManager.getCurrentSubChunkIndex(),
-                        playbackState = state.name,
-                        speechRate = ttsManager.speechRate.value,
-                        voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId,
-                        timestamp = System.currentTimeMillis(),
-                        wasActivelyPlaying = (state == TtsState.PLAYING),
-                        interruptionReason = when (state) {
-                            TtsState.PLAYING -> TtsInterruptionReason.UNEXPECTED_INTERRUPTION
-                            TtsState.PAUSED -> TtsInterruptionReason.EXPLICIT_PAUSE
-                            TtsState.STOPPED -> TtsInterruptionReason.EXPLICIT_STOP
-                            else -> TtsInterruptionReason.NONE
-                        }
-                    )
-                )
-                settingsRepo.setLastReadChapterId(meta.bookId, meta.chapterId)
-                settingsRepo.setLastReadParagraphIndex(meta.bookId, meta.chapterId, paraIndex)
-            }
+        // The manager persists every position change itself (single writer). This hook only re-arms
+        // the wake lock on progress so long sessions never outlive its timeout.
+        ttsManager.onPositionChanged = { _, _ ->
+            manageWakeLock(ttsManager.wantsCpuAwake())
         }
 
         observationJob?.cancel()
@@ -460,12 +478,13 @@ class TtsPlaybackService : Service() {
                     combine(
                         ttsManager.ttsState,
                         ttsManager.currentParagraphIndex,
-                        ttsManager.mediaMetadata
-                    ) { state, paraIndex, meta ->
+                        ttsManager.mediaMetadata,
+                        ttsManager.autoRetryPending
+                    ) { state, paraIndex, meta, _ ->
                         Triple(state, paraIndex, meta)
                     }.conflate().collect { (state, paraIndex, meta) ->
                         try {
-                            handleObservedState(state, paraIndex, meta, ttsManager, settingsRepo)
+                            handleObservedState(state, paraIndex, meta, ttsManager)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Throwable) {
@@ -481,17 +500,23 @@ class TtsPlaybackService : Service() {
                 }
             }
         }
+
+        wakeLockRenewJob?.cancel()
+        wakeLockRenewJob = serviceScope.launch {
+            while (isActive) {
+                delay(WAKELOCK_RENEW_INTERVAL_MS)
+                manageWakeLock(ttsManager.wantsCpuAwake())
+            }
+        }
     }
 
     private fun handleObservedState(
         state: TtsState,
         paraIndex: Int,
         meta: TtsMediaMetadata,
-        ttsManager: ReaderTtsManager,
-        settingsRepo: SettingsRepository
+        ttsManager: ReaderTtsManager
     ) {
-        // Manage WakeLock (safely renewable while PLAYING, released otherwise)
-        manageWakeLock(state == TtsState.PLAYING)
+        manageWakeLock(ttsManager.wantsCpuAwake())
 
         // Update MediaSession PlaybackState and Metadata
         try {
@@ -514,39 +539,10 @@ class TtsPlaybackService : Service() {
                     chapterId = meta.chapterId
                 )
                 notificationManager.notify(NOTIFICATION_ID, notification)
+                if (state == TtsState.PLAYING) notificationManager.cancel(RESUME_NOTIFICATION_ID)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "Failed to update notification", e)
-        }
-
-        // Persist state
-        try {
-            if (meta.bookId.isNotBlank() && meta.chapterId.isNotBlank()) {
-                settingsRepo.saveTtsSessionState(
-                    TtsPlaybackSessionState(
-                        bookId = meta.bookId,
-                        chapterId = meta.chapterId,
-                        chapterOrder = meta.chapterOrder,
-                        paragraphIndex = paraIndex,
-                        subChunkIndex = ttsManager.getCurrentSubChunkIndex(),
-                        playbackState = state.name,
-                        speechRate = ttsManager.speechRate.value,
-                        voiceId = ttsManager.selectedVoice.value?.id ?: ttsManager.savedVoiceId,
-                        timestamp = System.currentTimeMillis(),
-                        wasActivelyPlaying = (state == TtsState.PLAYING),
-                        interruptionReason = when (state) {
-                            TtsState.PLAYING -> TtsInterruptionReason.UNEXPECTED_INTERRUPTION
-                            TtsState.PAUSED -> TtsInterruptionReason.EXPLICIT_PAUSE
-                            TtsState.STOPPED -> TtsInterruptionReason.EXPLICIT_STOP
-                            else -> TtsInterruptionReason.NONE
-                        }
-                    )
-                )
-                settingsRepo.setLastReadChapterId(meta.bookId, meta.chapterId)
-                settingsRepo.setLastReadParagraphIndex(meta.bookId, meta.chapterId, paraIndex)
-            }
-        } catch (e: Throwable) {
-            Log.w(TAG, "Failed to persist TTS session state from service", e)
         }
 
         // If playback was explicitly stopped or ended, stop foreground service safely
@@ -595,19 +591,42 @@ class TtsPlaybackService : Service() {
         )
     }
 
-    private fun updateNotification(ttsManager: ReaderTtsManager) {
-        val meta = ttsManager.mediaMetadata.value
-        val notification = buildNotification(
-            novelTitle = meta.novelTitle.ifBlank { "Audiobook Playback" },
-            chapterTitle = meta.chapterTitle.ifBlank { "EPUB Reader" },
-            paragraphIndex = ttsManager.currentParagraphIndex.value,
-            totalParagraphs = ttsManager.getParagraphs().size,
-            state = ttsManager.ttsState.value,
-            bookId = meta.bookId,
-            chapterId = meta.chapterId
-        )
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-        notificationManager?.notify(NOTIFICATION_ID, notification)
+    /** Opens the reader at the TTS session; MainActivity resolves the newest position on arrival. */
+    private fun openSessionIntent(bookId: String, chapterId: String): Intent =
+        Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_TTS_SESSION, true)
+            if (bookId.isNotBlank()) putExtra(EXTRA_OPEN_BOOK_ID, bookId)
+            if (chapterId.isNotBlank()) putExtra(EXTRA_OPEN_CHAPTER_ID, chapterId)
+        }
+
+    private fun postResumeNotification() {
+        try {
+            val playIntent = Intent(this, TtsPlaybackService::class.java).setAction(ACTION_PLAY)
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            // Tapping a notification action lets Android start the foreground service again.
+            val playPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(this, 206, playIntent, flags)
+            } else {
+                PendingIntent.getService(this, 206, playIntent, flags)
+            }
+            val openPendingIntent = PendingIntent.getActivity(this, 207, openSessionIntent("", ""), flags)
+            val text = "Android stopped playback in the background. Tap Resume to continue where you left off."
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle("Audiobook playback stopped")
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setContentIntent(openPendingIntent)
+                .setAutoCancel(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .addAction(android.R.drawable.ic_media_play, "Resume", playPendingIntent)
+                .build()
+            getSystemService(NotificationManager::class.java)?.notify(RESUME_NOTIFICATION_ID, notification)
+            AppDiagnostics.log("service", "Foreground restart refused; posted a tap-to-resume notification")
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't post the resume notification", e)
+        }
     }
 
     private fun buildNotification(
@@ -623,15 +642,10 @@ class TtsPlaybackService : Service() {
         val isRecovering = state == TtsState.RECOVERING
 
         // Content intent: open reader in MainActivity
-        val contentIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            if (bookId.isNotBlank()) putExtra("extra_open_book_id", bookId)
-            if (chapterId.isNotBlank()) putExtra("extra_open_chapter_id", chapterId)
-        }
         val contentPendingIntent = PendingIntent.getActivity(
             this,
             201,
-            contentIntent,
+            openSessionIntent(bookId, chapterId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -703,6 +717,7 @@ class TtsPlaybackService : Service() {
             .setDeleteIntent(stopPendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setOngoing(isPlaying || isRecovering)
             .setSilent(true)
             .addAction(android.R.drawable.ic_media_previous, "Previous line", prevPendingIntent)
@@ -716,16 +731,12 @@ class TtsPlaybackService : Service() {
         manageWakeLock(false)
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         } catch (e: Exception) {
             Log.w(TAG, "Error stopping foreground", e)
         }
-        stopSelf()
+        // Stop only if no newer start is on its way; that start will answer with startForeground().
+        if (lastStartId > 0) stopSelf(lastStartId) else stopSelf()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -733,6 +744,8 @@ class TtsPlaybackService : Service() {
     override fun onDestroy() {
         observationJob?.cancel()
         observationJob = null
+        wakeLockRenewJob?.cancel()
+        wakeLockRenewJob = null
         serviceScope.cancel()
 
         manageWakeLock(false)

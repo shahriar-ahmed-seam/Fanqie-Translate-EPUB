@@ -456,29 +456,48 @@ object EpubParser {
         return stack.joinToString("/")
     }
 
+    const val BLOCK_SELECTOR = "p, h1, h2, h3, h4, h5, h6, blockquote, li, dt, dd"
+
     /**
-     * Extracts text blocks (paragraphs, headers, list items, blockquotes, divs with direct text)
-     * while preserving document reading flow.
+     * Text blocks in reading order. A block that contains other blocks (for example a blockquote
+     * holding paragraphs) is skipped so its text is not read or translated twice.
+     */
+    fun textBlockElements(doc: Document): List<Element> =
+        doc.select(BLOCK_SELECTOR).filter { element ->
+            element.text().isNotBlank() && element.select(BLOCK_SELECTOR).size == 1
+        }
+
+    /** The selection used by v1.0.x imports (nested blocks counted twice). Only used to export old imports. */
+    fun legacyBlockElements(doc: Document): List<Element> =
+        doc.select(BLOCK_SELECTOR).filter { it.text().isNotBlank() }
+
+    /**
+     * Extracts text blocks (paragraphs, headers, list items, blockquotes) while preserving reading
+     * order. Chapters without block tags (text separated by <br> or <div>) are split into lines.
      */
     fun extractTranslatableParagraphs(doc: Document): List<String> {
-        val elements = doc.select("p, h1, h2, h3, h4, h5, h6, blockquote, li, dt, dd")
-        val result = mutableListOf<String>()
+        val blocks = textBlockElements(doc)
+        if (blocks.isNotEmpty()) return blocks.map { it.text().trim() }
+        val body = doc.body() ?: return emptyList()
+        return textLines(body)
+    }
 
-        if (elements.isNotEmpty()) {
-            for (element in elements) {
-                val text = element.text().trim()
-                if (text.isNotBlank()) {
-                    result.add(text)
+    /** Visible text of [root] split at <br> and block boundaries. */
+    fun textLines(root: Element): List<String> {
+        val sb = StringBuilder()
+        org.jsoup.select.NodeTraversor.traverse(object : org.jsoup.select.NodeVisitor {
+            override fun head(node: org.jsoup.nodes.Node, depth: Int) {
+                when (node) {
+                    is org.jsoup.nodes.TextNode -> sb.append(node.text())
+                    is Element -> if (node.normalName() == "br") sb.append('\n')
                 }
             }
-        } else {
-            // Fallback to body text split by newlines if standard tags are not present
-            val bodyText = doc.body()?.text() ?: ""
-            bodyText.split("\n").map { it.trim() }.filter { it.isNotBlank() }.forEach {
-                result.add(it)
+
+            override fun tail(node: org.jsoup.nodes.Node, depth: Int) {
+                if (node is Element && node.isBlock) sb.append('\n')
             }
-        }
-        return result
+        }, root)
+        return sb.split('\n').map { it.replace(Regex("\\s+"), " ").trim() }.filter { it.isNotBlank() }
     }
 
     /**

@@ -28,7 +28,7 @@ class ExportNamingAndSettingsTest {
         val extremeSettings = AppSettings(
             workerCount = 999, // Should be clamped to 50
             maxActiveBooks = -10, // Should be clamped to 1
-            chunkSize = 99999, // Should be clamped to 4800
+            chunkSize = 99999, // Clamped to the provider's single-request limit (4200)
             maxRetries = 50, // Should be clamped to 10
             timeoutSeconds = 999 // Should be clamped to 120
         )
@@ -38,7 +38,7 @@ class ExportNamingAndSettingsTest {
 
         assertEquals(50, saved.workerCount)
         assertEquals(1, saved.maxActiveBooks)
-        assertEquals(4800, saved.chunkSize)
+        assertEquals(com.example.translation.TomatoMTLProvider.MAX_REQUEST_CHARS, saved.chunkSize)
         assertEquals(10, saved.maxRetries)
         assertEquals(120, saved.timeoutSeconds)
     }

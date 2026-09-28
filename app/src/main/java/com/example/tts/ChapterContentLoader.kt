@@ -6,11 +6,23 @@ import com.example.data.db.ChapterEntity
 import com.example.epub.EpubParser
 import java.io.File
 
+/** Whether a loaded chapter has real text to read, or only a placeholder for the reader screen. */
+enum class ChapterContentStatus {
+    READY,
+    /** No text at all (cover, image-only or blank page): auto-advance skips it. */
+    EMPTY,
+    /** Translation not finished yet: auto-advance waits instead of reading the placeholder aloud. */
+    UNTRANSLATED,
+    /** The book's source file is gone. */
+    MISSING
+}
+
 data class ChapterTransitionData(
     val nextChapterId: String,
     val nextChapterTitle: String,
     val nextChapterOrder: Int,
-    val paragraphs: List<String>
+    val paragraphs: List<String>,
+    val status: ChapterContentStatus = ChapterContentStatus.READY
 )
 
 interface ChapterTransitionProvider {
@@ -43,10 +55,13 @@ object ChapterContentLoader : ChapterTransitionProvider {
             val epubFile = book?.localFilePath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
                 ?: File(bookDir, "source.epub")
 
+            val status: ChapterContentStatus
             val extractedParas = if (epubFile.exists() && epubFile.length() > 0L) {
                 val parsed = EpubParser.extractChapterParagraphs(epubFile, chapter.originalHref)
+                status = if (parsed.isNotEmpty()) ChapterContentStatus.READY else ChapterContentStatus.EMPTY
                 if (parsed.isNotEmpty()) parsed else listOf("This chapter is empty.")
             } else {
+                status = ChapterContentStatus.MISSING
                 listOf("Source EPUB file not found.")
             }
 
@@ -54,7 +69,8 @@ object ChapterContentLoader : ChapterTransitionProvider {
                 nextChapterId = chapter.id,
                 nextChapterTitle = title,
                 nextChapterOrder = chapter.chapterOrder,
-                paragraphs = extractedParas
+                paragraphs = extractedParas,
+                status = status
             )
         } else {
             val chunks = if (job != null) {
@@ -86,11 +102,22 @@ object ChapterContentLoader : ChapterTransitionProvider {
                 listOf("This chapter has not been translated yet. Please wait for translation to complete.")
             }
 
+            // Chunks still waiting for (or in) translation mean the chapter isn't complete yet. Failed
+            // chunks won't change by waiting, so a chapter with only those left counts as readable.
+            val stillTranslating = bodyChunks.any { it.status == "PENDING" || it.status == "TRANSLATING" }
+            val status = when {
+                stillTranslating -> ChapterContentStatus.UNTRANSLATED
+                extractedParagraphs.isEmpty() && bodyChunks.isNotEmpty() -> ChapterContentStatus.UNTRANSLATED
+                extractedParagraphs.isEmpty() -> ChapterContentStatus.EMPTY
+                else -> ChapterContentStatus.READY
+            }
+
             ChapterTransitionData(
                 nextChapterId = chapter.id,
                 nextChapterTitle = resolvedTitle,
                 nextChapterOrder = chapter.chapterOrder,
-                paragraphs = finalParagraphs
+                paragraphs = finalParagraphs,
+                status = status
             )
         }
     }

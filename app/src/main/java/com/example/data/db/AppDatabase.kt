@@ -6,6 +6,17 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.scraper.data.BrowserHistoryDao
+import com.example.scraper.data.BrowserHistoryEntity
+import com.example.scraper.data.ScrapeProjectDao
+import com.example.scraper.data.ScrapeProjectEntity
+import com.example.scraper.data.ScrapeSessionDao
+import com.example.scraper.data.ScrapeSessionEntity
+import com.example.scraper.data.ScrapedChapterDao
+import com.example.scraper.data.ScrapedChapterEntity
+import com.example.scraper.data.ScraperSchema
+import com.example.scraper.data.SiteStrategyDao
+import com.example.scraper.data.SiteStrategyEntity
 
 val MIGRATION_1_2 = object : Migration(1, 2) {
     override fun migrate(db: SupportSQLiteDatabase) {
@@ -139,6 +150,25 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
+/** v6: chapter scraper tables (see com.example.scraper.data) and the "Scraped" library group. */
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        ScraperSchema.createTables(db)
+        seedScrapedGroup(db, System.currentTimeMillis())
+    }
+}
+
+const val SCRAPED_GROUP_ID = "default_scraped"
+
+private fun seedScrapedGroup(db: SupportSQLiteDatabase, now: Long) {
+    db.execSQL(
+        "INSERT OR IGNORE INTO `library_groups` (`id`, `name`, `sortOrder`, `isSystemGroup`, `systemKey`, `createdAt`) " +
+            "VALUES ('$SCRAPED_GROUP_ID', 'Scraped', 3, 1, 'SCRAPED', $now)"
+    )
+}
+
+val ALL_MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+
 val DB_CALLBACK = object : RoomDatabase.Callback() {
     override fun onCreate(db: SupportSQLiteDatabase) {
         super.onCreate(db)
@@ -164,6 +194,7 @@ val DB_CALLBACK = object : RoomDatabase.Callback() {
             VALUES ('default_local', 'Local Books', 2, 1, 'LOCAL', $now)
             """.trimIndent()
         )
+        seedScrapedGroup(db, now)
     }
 }
 
@@ -176,10 +207,15 @@ val DB_CALLBACK = object : RoomDatabase.Callback() {
         LibraryGroupEntity::class,
         BookGroupCrossRefEntity::class,
         ChapterBookmarkEntity::class,
-        TtsRuleEntity::class
+        TtsRuleEntity::class,
+        ScrapeProjectEntity::class,
+        ScrapedChapterEntity::class,
+        ScrapeSessionEntity::class,
+        SiteStrategyEntity::class,
+        BrowserHistoryEntity::class
     ],
-    version = 5,
-    exportSchema = false
+    version = 6,
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun bookDao(): BookDao
@@ -189,6 +225,11 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun groupDao(): LibraryGroupDao
     abstract fun bookmarkDao(): BookmarkDao
     abstract fun ttsRuleDao(): TtsRuleDao
+    abstract fun scrapeProjectDao(): ScrapeProjectDao
+    abstract fun scrapedChapterDao(): ScrapedChapterDao
+    abstract fun scrapeSessionDao(): ScrapeSessionDao
+    abstract fun siteStrategyDao(): SiteStrategyDao
+    abstract fun browserHistoryDao(): BrowserHistoryDao
 
     companion object {
         @Volatile
@@ -200,7 +241,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "epub_translator.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                ).addMigrations(*ALL_MIGRATIONS)
                  .addCallback(DB_CALLBACK)
                  .build()
                 INSTANCE = instance

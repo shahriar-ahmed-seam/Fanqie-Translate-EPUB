@@ -82,20 +82,18 @@ fun ReaderScreen(
     val app = context.applicationContext as? TranslatorApplication
     val ttsManager = remember { app?.ttsManager ?: ReaderTtsManager(context.applicationContext) }
 
-    var currentChapterId by rememberSaveable(bookId) {
-        val meta = app?.ttsManager?.mediaMetadata?.value
-        val activeState = app?.ttsManager?.ttsState?.value
-        val activeChapter = if ((activeState == TtsState.PLAYING || activeState == TtsState.PAUSED) &&
+    // Not saveable on purpose: after the process dies the saved value can be hours old (TTS kept
+    // advancing in the background), which reopened an old chapter. MainApp resolves the newest
+    // position (live TTS session, then saved progress) and passes it in as initialChapterId.
+    var currentChapterId by remember(bookId) {
+        val manager = app?.ttsManager
+        val meta = manager?.mediaMetadata?.value
+        val activeChapter = if (manager != null && manager.hasActiveSession() &&
             meta?.bookId == bookId && !meta.chapterId.isNullOrBlank()
         ) {
             meta.chapterId
         } else {
-            val sessionState = settingsRepo.getTtsSessionState()
-            if (sessionState != null && sessionState.bookId == bookId && sessionState.chapterId.isNotBlank()) {
-                sessionState.chapterId
-            } else {
-                initialChapterId
-            }
+            initialChapterId
         }
         mutableStateOf(activeChapter)
     }
@@ -162,8 +160,10 @@ fun ReaderScreen(
     val isAnotherNovelOrChapterPlaying = (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) &&
             (ttsMetadata.bookId != bookId || ttsMetadata.chapterId != currentChapterId)
 
-    // Synchronize currentChapterId if TTS is actively playing or paused for this book and advances in background
-    LaunchedEffect(ttsMetadata.chapterId, ttsMetadata.bookId, ttsState) {
+    // Follow TTS when it moves to another chapter of this book (auto-advance in the background).
+    // Keyed on the TTS chapter only: a play/pause change must not pull the reader back while the
+    // user is switching chapters.
+    LaunchedEffect(ttsMetadata.chapterId, ttsMetadata.bookId) {
         if ((ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) &&
             ttsMetadata.bookId == bookId &&
             ttsMetadata.chapterId.isNotBlank() &&
@@ -173,15 +173,53 @@ fun ReaderScreen(
         }
     }
 
-    // Restore persisted settings into TTS manager on first composition
+    // Restore persisted settings into TTS manager on first composition (no-ops when unchanged, so an
+    // ongoing paragraph isn't restarted when the reader opens).
     LaunchedEffect(Unit) {
         ttsManager.setTtsEnabled(settingsRepo.isTtsEnabled())
         ttsManager.setSpeechRate(settingsRepo.getTtsSpeechRate())
         val savedVoice = settingsRepo.getTtsVoiceId()
-        if (savedVoice != null) {
+        if (savedVoice != null && ttsManager.selectedVoice.value?.id != savedVoice) {
             ttsManager.savedVoiceId = savedVoice
             ttsManager.selectVoiceById(savedVoice)
         }
+    }
+
+    // Unrestricted battery use keeps Doze and OEM battery savers from cutting playback with the screen
+    // off. Asked once, the first time the user starts listening.
+    var showBatteryPrompt by remember { mutableStateOf(false) }
+    val maybeAskForBackgroundPlayback: () -> Unit = {
+        if (!settingsRepo.wasBackgroundPlaybackPromptShown() &&
+            !com.example.diagnostics.BackgroundPolicy.isIgnoringBatteryOptimizations(context)
+        ) {
+            settingsRepo.setBackgroundPlaybackPromptShown(true)
+            showBatteryPrompt = true
+        }
+    }
+    if (showBatteryPrompt) {
+        AlertDialog(
+            onDismissRequest = { showBatteryPrompt = false },
+            title = { Text("Keep listening with the screen off") },
+            text = {
+                Text(
+                    "Android's battery saver can stop audiobook playback when the phone is locked. " +
+                        "Allow unrestricted battery use for this app so listening isn't cut off. " +
+                        "You can change this later in Settings."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showBatteryPrompt = false
+                        com.example.diagnostics.BackgroundPolicy.requestIgnoreBatteryOptimizations(context)
+                    },
+                    modifier = Modifier.testTag("battery_prompt_allow")
+                ) { Text("Allow") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatteryPrompt = false }) { Text("Not now") }
+            }
+        )
     }
 
     var showTtsControls by rememberSaveable { mutableStateOf(false) }
@@ -241,6 +279,7 @@ fun ReaderScreen(
     var lastSavedParaIndex by rememberSaveable { mutableIntStateOf(0) }
 
     val playCurrentChapter: (Int) -> Unit = { targetIndex ->
+        maybeAskForBackgroundPlayback()
         ttsManager.setChapterAndParagraphs(
             chapterId = currentChapterId,
             newParagraphs = paragraphs,
@@ -291,7 +330,20 @@ fun ReaderScreen(
         val resumeTts = shouldContinueTtsOnNextChapter
         shouldContinueTtsOnNextChapter = false
 
-        if (isCurrentChapterActiveInTts) {
+        if (resumeTts) {
+            // The user changed chapter while listening to the previous one: keep listening here.
+            ttsManager.setChapterAndParagraphs(
+                chapterId = currentChapterId,
+                newParagraphs = paragraphs,
+                continuePlaying = true,
+                startIndex = 0,
+                bookId = bookId,
+                novelTitle = novelTitle,
+                chapterTitle = chapterTitle,
+                chapterOrder = currentChapter?.chapterOrder ?: 0
+            )
+            listState.scrollToItem(0)
+        } else if (isCurrentChapterActiveInTts) {
             ttsManager.setChapterMetadata(
                 bookId = bookId,
                 chapterId = currentChapterId,
@@ -303,8 +355,8 @@ fun ReaderScreen(
             if (activePara in paragraphs.indices) {
                 listState.scrollToItem((activePara + 1).coerceAtMost(paragraphs.size))
             }
-        } else if (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) {
-            // TTS session is actively running or paused in background.
+        } else if (ttsManager.hasActiveSession()) {
+            // TTS session is running, paused, recovering or retrying elsewhere.
             // Under NO circumstance should this reader screen call setChapterAndParagraphs or disrupt playback.
             if (savedPara > 0 && savedPara < paragraphs.size) {
                 listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
@@ -333,6 +385,13 @@ fun ReaderScreen(
                 listState.scrollToItem((savedPara + 1).coerceAtMost(paragraphs.size))
             } else if (!resumeTts) {
                 listState.scrollToItem(0)
+            }
+            // Listening here was cut off (process ended): show the controls so Play is one tap away.
+            if (sessionState != null && sessionState.bookId == bookId && sessionState.chapterId == currentChapterId &&
+                sessionState.wasActivelyPlaying &&
+                sessionState.interruptionReason == com.example.tts.TtsInterruptionReason.UNEXPECTED_INTERRUPTION
+            ) {
+                showTtsControls = true
             }
         }
 
@@ -681,6 +740,7 @@ fun ReaderScreen(
                                 FilledIconButton(
                                     onClick = {
                                         if (isCurrentChapterActiveInTts) {
+                                            maybeAskForBackgroundPlayback()
                                             if (ttsState == TtsState.PAUSED) {
                                                 ttsManager.resume()
                                             } else if (ttsState == TtsState.ERROR) {
@@ -785,8 +845,10 @@ fun ReaderScreen(
                         FilledTonalButton(
                             onClick = {
                                 if (prevChapter != null) {
+                                    // Only touch TTS when it is reading this chapter; browsing other
+                                    // chapters must not silence a session playing elsewhere.
                                     val wasPlaying = isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING
-                                    ttsManager.prepareForChapterChange()
+                                    if (wasPlaying) ttsManager.prepareForChapterChange()
                                     shouldContinueTtsOnNextChapter = wasPlaying
                                     currentChapterId = prevChapter.id
                                 }
@@ -809,8 +871,10 @@ fun ReaderScreen(
                         FilledTonalButton(
                             onClick = {
                                 if (nextChapter != null) {
+                                    // Only touch TTS when it is reading this chapter; browsing other
+                                    // chapters must not silence a session playing elsewhere.
                                     val wasPlaying = isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING
-                                    ttsManager.prepareForChapterChange()
+                                    if (wasPlaying) ttsManager.prepareForChapterChange()
                                     shouldContinueTtsOnNextChapter = wasPlaying
                                     currentChapterId = nextChapter.id
                                 }
@@ -1046,8 +1110,10 @@ fun ReaderScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
+                                    // Only touch TTS when it is reading this chapter; browsing other
+                                    // chapters must not silence a session playing elsewhere.
                                     val wasPlaying = isCurrentChapterActiveInTts && ttsState == TtsState.PLAYING
-                                    ttsManager.prepareForChapterChange()
+                                    if (wasPlaying) ttsManager.prepareForChapterChange()
                                     shouldContinueTtsOnNextChapter = wasPlaying
                                     currentChapterId = chapter.id
                                     showChapterPickerSheet = false
