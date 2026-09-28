@@ -30,7 +30,7 @@ class SettingsRepositoryTest {
         val settings = repo.settings.value
 
         assertEquals("shahriar-ahmed-seam", settings.githubOwner)
-        assertEquals("Fanqie-Translate-EPUB", settings.githubRepo)
+        assertEquals("Fanqie-Translate-EPUB-releases", settings.githubRepo)
     }
 
     @Test
@@ -46,7 +46,7 @@ class SettingsRepositoryTest {
         val settings = repo.settings.value
 
         assertEquals("shahriar-ahmed-seam", settings.githubOwner)
-        assertEquals("Fanqie-Translate-EPUB", settings.githubRepo)
+        assertEquals("Fanqie-Translate-EPUB-releases", settings.githubRepo)
     }
 
     @Test

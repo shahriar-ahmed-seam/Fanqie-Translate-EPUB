@@ -26,7 +26,9 @@ import com.example.queue.ImportProgress
 import com.example.queue.TranslationQueueManager
 import com.example.update.AppUpdateManager
 import com.example.update.ReleaseInfo
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -102,11 +104,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _previewState = MutableStateFlow<BookPreviewState?>(null)
     val previewState: StateFlow<BookPreviewState?> = _previewState.asStateFlow()
 
-    private val _updateState = MutableStateFlow<ReleaseInfo?>(null)
-    val updateState: StateFlow<ReleaseInfo?> = _updateState.asStateFlow()
-
-    private val _updateProgress = MutableStateFlow<Float?>(null)
-    val updateProgress: StateFlow<Float?> = _updateProgress.asStateFlow()
+    private val _updateState = MutableStateFlow<UpdateUiState?>(null)
+    /** In-app update flow: Available -> Downloading -> ReadyToInstall, or Failed with a reason. */
+    val updateState: StateFlow<UpdateUiState?> = _updateState.asStateFlow()
+    private var updateDownloadJob: Job? = null
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
@@ -525,7 +526,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (result.isSuccess) {
                 val info = result.getOrNull()
                 if (info != null && info.isNewer) {
-                    _updateState.value = info
+                    // Don't reset a download that is already running or finished for this release.
+                    if (_updateState.value?.info?.tagName != info.tagName) {
+                        _updateState.value = UpdateUiState(info, UpdateStep.Available)
+                    }
                 } else if (!silent) {
                     _message.value = "You are using the latest version (v${com.example.BuildConfig.VERSION_NAME})"
                 }
@@ -537,21 +541,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun dismissUpdateDialog() {
+        updateDownloadJob?.cancel()
+        updateDownloadJob = null
         _updateState.value = null
-        _updateProgress.value = null
     }
 
-    fun startApkDownload(downloadUrl: String) {
-        viewModelScope.launch {
-            _updateProgress.value = 0f
-            val result = updateManager.downloadAndInstallApk(downloadUrl) { progress ->
-                _updateProgress.value = progress
-            }
-            if (result.isFailure) {
-                _updateProgress.value = null
-                _message.value = "Failed to download update: ${result.exceptionOrNull()?.message}"
-            }
+    /** Downloads and verifies the APK; the dialog then offers Install (launched by the activity). */
+    fun startUpdateDownload() {
+        val current = _updateState.value ?: return
+        if (current.step is UpdateStep.Downloading) return
+        val info = current.info
+        if (info.apkDownloadUrl == null) {
+            _updateState.value = current.copy(step = UpdateStep.Failed("This release has no APK attached.", canRetry = false))
+            return
         }
+        updateDownloadJob?.cancel()
+        _updateState.value = current.copy(step = UpdateStep.Downloading(if (info.apkSizeBytes > 0) 0f else null))
+        updateDownloadJob = viewModelScope.launch {
+            val result = updateManager.downloadUpdate(info) { progress ->
+                _updateState.value = _updateState.value?.takeIf { it.info.tagName == info.tagName }
+                    ?.copy(step = UpdateStep.Downloading(progress))
+            }
+            val latest = _updateState.value?.takeIf { it.info.tagName == info.tagName } ?: return@launch
+            _updateState.value = result.fold(
+                onSuccess = { apk -> latest.copy(step = UpdateStep.ReadyToInstall(apk)) },
+                onFailure = { error ->
+                    if (error is CancellationException) return@launch
+                    latest.copy(
+                        step = UpdateStep.Failed(
+                            message = error.message ?: "The download failed.",
+                            canRetry = error !is com.example.update.UpdateVerificationException
+                        )
+                    )
+                }
+            )
+        }
+    }
+
+    /** The system installer couldn't be opened. */
+    fun onUpdateInstallFailed(message: String) {
+        val current = _updateState.value ?: return
+        _updateState.value = current.copy(step = UpdateStep.Failed(message, canRetry = true))
     }
 
     fun createGroup(name: String) {

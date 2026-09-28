@@ -219,7 +219,6 @@ fun MainApp(
     val libraryViewMode by viewModel.libraryViewMode.collectAsStateWithLifecycle()
     val previewState by viewModel.previewState.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
-    val updateProgress by viewModel.updateProgress.collectAsStateWithLifecycle()
     val importProgress by viewModel.importProgress.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
@@ -421,12 +420,39 @@ fun MainApp(
     }
 
     // In-App Update Dialog
-    updateState?.let { releaseInfo ->
+    updateState?.let { update ->
+        // Re-checked on every composition: the user may have just allowed installs in Settings.
+        var canInstall by remember { mutableStateOf(viewModel.updateManager.canInstallPackages()) }
+        val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    canInstall = viewModel.updateManager.canInstallPackages()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
         UpdateDialog(
-            releaseInfo = releaseInfo,
-            downloadProgress = updateProgress,
+            state = update,
+            canInstallPackages = canInstall,
             onDismiss = { viewModel.dismissUpdateDialog() },
-            onDownload = { downloadUrl -> viewModel.startApkDownload(downloadUrl) }
+            onDownload = { viewModel.startUpdateDownload() },
+            onInstall = { apk ->
+                val activity = context as? android.app.Activity
+                when {
+                    activity == null -> viewModel.onUpdateInstallFailed("Couldn't open the installer.")
+                    !viewModel.updateManager.canInstallPackages() -> {
+                        if (!viewModel.updateManager.openInstallPermissionSettings(activity)) {
+                            viewModel.onUpdateInstallFailed(
+                                "Allow \"Install unknown apps\" for Fanqie Translate in Android Settings, then try again."
+                            )
+                        }
+                    }
+                    !viewModel.updateManager.launchInstaller(activity, apk) ->
+                        viewModel.onUpdateInstallFailed("Couldn't open the Android installer. Please try again.")
+                }
+            }
         )
     }
 

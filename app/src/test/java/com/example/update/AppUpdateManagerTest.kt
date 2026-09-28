@@ -12,6 +12,7 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -42,11 +43,18 @@ class AppUpdateManagerTest {
         assertEquals("shahriar-ahmed-seam", AppUpdateManager.sanitizeOwner(""))
         assertEquals("shahriar-ahmed-seam", AppUpdateManager.sanitizeOwner("shahriarseam"))
 
-        assertEquals("Fanqie-Translate-EPUB", AppUpdateManager.sanitizeRepo("Fanqie-Translate-EPUB"))
-        assertEquals("Fanqie-Translate-EPUB", AppUpdateManager.sanitizeRepo("  Fanqie-Translate-EPUB  "))
-        assertEquals("Fanqie-Translate-EPUB", AppUpdateManager.sanitizeRepo("https://github.com/shahriar-ahmed-seam/Fanqie-Translate-EPUB.git"))
-        assertEquals("Fanqie-Translate-EPUB", AppUpdateManager.sanitizeRepo(""))
-        assertEquals("Fanqie-Translate-EPUB", AppUpdateManager.sanitizeRepo("epub-translator"))
+        // The private source repository and older names map to the public releases repository.
+        val releases = "Fanqie-Translate-EPUB-releases"
+        assertEquals(releases, AppUpdateManager.sanitizeRepo("Fanqie-Translate-EPUB"))
+        assertEquals(releases, AppUpdateManager.sanitizeRepo("  Fanqie-Translate-EPUB  "))
+        assertEquals(releases, AppUpdateManager.sanitizeRepo("https://github.com/shahriar-ahmed-seam/Fanqie-Translate-EPUB.git"))
+        assertEquals(releases, AppUpdateManager.sanitizeRepo(""))
+        assertEquals(releases, AppUpdateManager.sanitizeRepo("epub-translator"))
+        assertEquals(releases, AppUpdateManager.sanitizeRepo("https://github.com/shahriar-ahmed-seam/Fanqie-Translate-EPUB-releases"))
+        assertEquals("my-fork", AppUpdateManager.sanitizeRepo("my-fork"))
+        assertNull(AppUpdateManager.parseSha256Digest("sha256:abc"))
+        assertEquals("a".repeat(64), AppUpdateManager.parseSha256Digest("sha256:" + "A".repeat(64)))
+        assertNull(AppUpdateManager.parseSha256Digest("md5:1234"))
     }
 
     @Test
