@@ -7,6 +7,8 @@
 *.zip
 release/
 
+.kiro
+
 # Generated build files
 build/
 **/build/
@@ -32,9 +34,14 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-# Keystore files
+# Keystore files and signing secrets (CI uses GitHub Actions secrets)
 *.keystore
-!*.base64
+*.jks
+*.keystore.base64
+keystore.properties
+
+# Nested checkout of the old scraper repo (merged into this app)
+novel-Sc/
 
 # Environment & secrets
 .env

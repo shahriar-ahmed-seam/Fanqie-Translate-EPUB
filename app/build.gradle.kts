@@ -1,5 +1,4 @@
-import java.util.Base64
-import java.util.concurrent.TimeUnit
+import java.util.Properties
 
 plugins {
   alias(libs.plugins.android.application)
@@ -16,95 +15,39 @@ android {
     applicationId = "com.aistudio.epubtranslator.qxnrpb"
     minSdk = 24
     targetSdk = 36
-    fun resolveVersionName(): String {
-      val prop = providers.gradleProperty("versionName").orNull
-        ?: project.findProperty("versionName")?.toString()
-      if (!prop.isNullOrBlank()) return prop.trim()
-
-      return try {
-        val process = ProcessBuilder("git", "describe", "--tags", "--abbrev=0")
-          .directory(rootDir)
-          .redirectOutput(ProcessBuilder.Redirect.PIPE)
-          .redirectError(ProcessBuilder.Redirect.DISCARD)
-          .start()
-        val tag = process.inputStream.bufferedReader().readText().trim()
-        process.waitFor(2, TimeUnit.SECONDS)
-        if (tag.isNotEmpty()) {
-          tag.removePrefix("v").removePrefix("V").trim()
-        } else {
-          "1.0.0"
-        }
-      } catch (_: Exception) {
-        "1.0.0"
-      }
-    }
-
-    fun resolveVersionCode(): Int {
-      val prop = providers.gradleProperty("versionCode").orNull
-        ?: project.findProperty("versionCode")?.toString()
-      prop?.toIntOrNull()?.let { return it }
-
-      return try {
-        val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
-          .directory(rootDir)
-          .redirectOutput(ProcessBuilder.Redirect.PIPE)
-          .redirectError(ProcessBuilder.Redirect.DISCARD)
-          .start()
-        val countStr = process.inputStream.bufferedReader().readText().trim()
-        process.waitFor(2, TimeUnit.SECONDS)
-        countStr.toIntOrNull()?.takeIf { it > 0 } ?: 1
-      } catch (_: Exception) {
-        1
-      }
-    }
-
-    versionCode = resolveVersionCode()
-    versionName = resolveVersionName()
+    // CI passes -PversionName/-PversionCode. Local builds use the latest vX.Y.Z tag.
+    // versionCode = major * 1_000_000 + minor * 1_000 + patch (same formula as .github/workflows/release.yml).
+    val resolvedVersionName = providers.gradleProperty("versionName").orNull?.trim()?.removePrefix("v")?.takeIf { it.isNotEmpty() }
+      ?: latestGitTagVersion()
+      ?: "1.0.0"
+    versionName = resolvedVersionName
+    versionCode = providers.gradleProperty("versionCode").orNull?.trim()?.toIntOrNull()
+      ?: versionCodeFor(resolvedVersionName)
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  // Release signing comes from the environment (GitHub Actions secrets) or from a gitignored
+  // keystore.properties at the project root. Nothing secret is stored in the repository.
+  val signing = releaseSigning()
   signingConfigs {
-    create("release") {
-      val releaseKeystore = file("${rootDir}/release.keystore")
-      if (!releaseKeystore.exists()) {
-        val base64File = file("${rootDir}/release.keystore.base64")
-        if (base64File.exists()) {
-          val decoded = Base64.getDecoder().decode(base64File.readText().trim())
-          releaseKeystore.writeBytes(decoded)
-        }
-      }
-      if (releaseKeystore.exists()) {
-        storeFile = releaseKeystore
-        storePassword = "fanqietranslate"
-        keyAlias = "epubtranslator"
-        keyPassword = "fanqietranslate"
-      }
-    }
-    getByName("debug") {
-      val releaseKeystore = file("${rootDir}/release.keystore")
-      if (!releaseKeystore.exists()) {
-        val base64File = file("${rootDir}/release.keystore.base64")
-        if (base64File.exists()) {
-          val decoded = Base64.getDecoder().decode(base64File.readText().trim())
-          releaseKeystore.writeBytes(decoded)
-        }
-      }
-      if (releaseKeystore.exists()) {
-        storeFile = releaseKeystore
-        storePassword = "fanqietranslate"
-        keyAlias = "epubtranslator"
-        keyPassword = "fanqietranslate"
+    if (signing != null) {
+      create("release") {
+        storeFile = file(signing.getValue("storeFile"))
+        storePassword = signing.getValue("storePassword")
+        keyAlias = signing.getValue("keyAlias")
+        keyPassword = signing.getValue("keyPassword")
       }
     }
   }
 
   buildTypes {
     debug {
-      signingConfig = signingConfigs.getByName("release")
+      // With the release key available, debug builds install over release builds (handy on a real phone).
+      if (signing != null) signingConfig = signingConfigs.getByName("release")
     }
     release {
-      signingConfig = signingConfigs.getByName("release")
+      if (signing != null) signingConfig = signingConfigs.getByName("release")
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -139,6 +82,52 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+}
+
+ksp {
+  // Exported schemas are committed and used by the migration tests.
+  arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+/** "1.2.3" from the newest vX.Y.Z tag reachable from HEAD, or null without git/tags. */
+fun latestGitTagVersion(): String? = try {
+  providers.exec {
+    commandLine("git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*.[0-9]*.[0-9]*")
+    workingDir = rootDir
+    isIgnoreExitValue = true
+  }.standardOutput.asText.get().trim().removePrefix("v").takeIf { it.matches(Regex("\\d+\\.\\d+\\.\\d+")) }
+} catch (_: Exception) {
+  null
+}
+
+fun versionCodeFor(name: String): Int {
+  val parts = name.substringBefore('-').split('.').map { part -> part.filter { it.isDigit() }.toIntOrNull() ?: 0 }
+  val major = parts.getOrElse(0) { 1 }
+  val minor = parts.getOrElse(1) { 0 }.coerceIn(0, 999)
+  val patch = parts.getOrElse(2) { 0 }.coerceIn(0, 999)
+  return major * 1_000_000 + minor * 1_000 + patch
+}
+
+/**
+ * Release keystore settings: SIGNING_STORE_FILE / SIGNING_STORE_PASSWORD / SIGNING_KEY_ALIAS /
+ * SIGNING_KEY_PASSWORD environment variables (CI), else keystore.properties (local, gitignored).
+ */
+fun releaseSigning(): Map<String, String>? {
+  val env = mapOf(
+    "storeFile" to providers.environmentVariable("SIGNING_STORE_FILE").orNull,
+    "storePassword" to providers.environmentVariable("SIGNING_STORE_PASSWORD").orNull,
+    "keyAlias" to providers.environmentVariable("SIGNING_KEY_ALIAS").orNull,
+    "keyPassword" to providers.environmentVariable("SIGNING_KEY_PASSWORD").orNull
+  )
+  if (env.values.all { !it.isNullOrBlank() }) return env.mapValues { it.value!! }
+  val propsFile = rootProject.file("keystore.properties")
+  if (!propsFile.exists()) return null
+  val props = Properties().apply { propsFile.inputStream().use { load(it) } }
+  val values = listOf("storeFile", "storePassword", "keyAlias", "keyPassword").associateWith { props.getProperty(it)?.trim() }
+  if (values.values.any { it.isNullOrBlank() }) return null
+  val store = rootProject.file(values.getValue("storeFile")!!)
+  if (!store.exists()) return null
+  return values.mapValues { it.value!! } + ("storeFile" to store.absolutePath)
 }
 
 dependencies {
@@ -180,6 +169,7 @@ dependencies {
   androidTestImplementation(libs.androidx.espresso.core)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)
+  androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.10.0")
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)

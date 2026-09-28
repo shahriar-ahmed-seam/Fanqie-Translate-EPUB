@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -27,6 +28,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.scraper.ScraperGraph
+import com.example.scraper.ui.ScraperRoot
+import com.example.scraper.ui.ScraperScreen
+import com.example.scraper.ui.ScraperViewModel
 import com.example.queue.ImportProgress
 import com.example.ui.*
 import com.example.ui.theme.MyApplicationTheme
@@ -35,6 +41,7 @@ import java.io.File
 enum class Screen(val title: String) {
     HOME("Home"),
     LIBRARY("Library"),
+    SCRAPER("Scraper"),
     QUEUE("Queue"),
     SETTINGS("Settings")
 }
@@ -44,6 +51,8 @@ class MainActivity : ComponentActivity() {
 
     val pendingNotificationBookId = mutableStateOf<String?>(null)
     val pendingNotificationChapterId = mutableStateOf<String?>(null)
+    /** Set when the scraper's notification is tapped. */
+    val pendingOpenScraper = mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -59,6 +68,9 @@ class MainActivity : ComponentActivity() {
             pendingNotificationBookId.value = bId
             pendingNotificationChapterId.value = cId
         }
+        if (intent?.getBooleanExtra(ScraperGraph.EXTRA_OPEN_SCRAPER, false) == true) {
+            pendingOpenScraper.value = true
+        }
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
@@ -70,7 +82,8 @@ class MainActivity : ComponentActivity() {
                 MainApp(
                     viewModel = viewModel,
                     pendingNotificationBookId = pendingNotificationBookId,
-                    pendingNotificationChapterId = pendingNotificationChapterId
+                    pendingNotificationChapterId = pendingNotificationChapterId,
+                    pendingOpenScraper = pendingOpenScraper
                 )
             }
         }
@@ -85,6 +98,9 @@ class MainActivity : ComponentActivity() {
             pendingNotificationBookId.value = bId
             pendingNotificationChapterId.value = cId
         }
+        if (intent.getBooleanExtra(ScraperGraph.EXTRA_OPEN_SCRAPER, false)) {
+            pendingOpenScraper.value = true
+        }
     }
 }
 
@@ -92,7 +108,8 @@ class MainActivity : ComponentActivity() {
 fun MainApp(
     viewModel: MainViewModel,
     pendingNotificationBookId: MutableState<String?>? = null,
-    pendingNotificationChapterId: MutableState<String?>? = null
+    pendingNotificationChapterId: MutableState<String?>? = null,
+    pendingOpenScraper: MutableState<Boolean>? = null
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as? TranslatorApplication
@@ -124,6 +141,22 @@ fun MainApp(
     var selectedBookIdForDetail by rememberSaveable { mutableStateOf<String?>(null) }
     var activeReaderBookId by rememberSaveable { mutableStateOf(initialBookId) }
     var activeReaderChapterId by rememberSaveable { mutableStateOf(initialChapterId) }
+
+    val scraperViewModel: ScraperViewModel = viewModel()
+    val scraperScreen by scraperViewModel.screen.collectAsStateWithLifecycle()
+    // The browser needs the whole screen, so the bottom bar hides while it's open.
+    val scraperFullScreen = currentScreen == Screen.SCRAPER && scraperScreen == ScraperScreen.Browser
+
+    LaunchedEffect(pendingOpenScraper?.value) {
+        if (pendingOpenScraper?.value == true) {
+            activeReaderBookId = null
+            activeReaderChapterId = null
+            selectedBookIdForDetail = null
+            currentScreen = Screen.SCRAPER
+            scraperViewModel.openBrowser()
+            pendingOpenScraper.value = false
+        }
+    }
 
     // Handle new intent notification click while activity is alive
     LaunchedEffect(pendingNotificationBookId?.value, pendingNotificationChapterId?.value) {
@@ -211,7 +244,7 @@ fun MainApp(
             modifier = Modifier.fillMaxSize(),
             snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
-                NavigationBar(modifier = Modifier.testTag("bottom_nav_bar")) {
+                if (!scraperFullScreen) NavigationBar(modifier = Modifier.testTag("bottom_nav_bar")) {
                     NavigationBarItem(
                         selected = currentScreen == Screen.HOME,
                         onClick = { currentScreen = Screen.HOME },
@@ -225,6 +258,22 @@ fun MainApp(
                         icon = { Icon(Icons.Default.AutoStories, contentDescription = "Library") },
                         label = { Text("Library") },
                         modifier = Modifier.testTag("nav_library")
+                    )
+                    NavigationBarItem(
+                        selected = currentScreen == Screen.SCRAPER,
+                        onClick = {
+                            // Tapping the tab again returns to the scraper's first screen.
+                            if (currentScreen == Screen.SCRAPER) scraperViewModel.goHome()
+                            currentScreen = Screen.SCRAPER
+                        },
+                        icon = {
+                            val scraping by scraperViewModel.progress.collectAsStateWithLifecycle()
+                            BadgedBox(badge = { if (scraping.status.isActive) Badge() }) {
+                                Icon(Icons.Default.TravelExplore, contentDescription = "Scraper")
+                            }
+                        },
+                        label = { Text("Scraper") },
+                        modifier = Modifier.testTag("nav_scraper")
                     )
                     NavigationBarItem(
                         selected = currentScreen == Screen.QUEUE,
@@ -304,11 +353,21 @@ fun MainApp(
                         onCancelJob = { viewModel.cancelJob(it) },
                         onExportEpub = onExport
                     )
+                    Screen.SCRAPER -> ScraperRoot(
+                        viewModel = scraperViewModel,
+                        modifier = Modifier.consumeWindowInsets(innerPadding),
+                        onOpenLibraryBook = { bookId -> selectedBookIdForDetail = bookId }
+                    )
                     Screen.SETTINGS -> SettingsScreen(
                         settings = settings,
                         onSaveSettings = { viewModel.updateSettings(it) },
                         onCheckForUpdates = { viewModel.checkForUpdates(silent = false) },
-                        viewModel = viewModel
+                        viewModel = viewModel,
+                        onOpenScraperSettings = {
+                            scraperViewModel.goHome()
+                            scraperViewModel.open(ScraperScreen.Settings)
+                            currentScreen = Screen.SCRAPER
+                        }
                     )
                 }
             }

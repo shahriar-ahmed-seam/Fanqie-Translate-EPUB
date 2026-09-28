@@ -913,6 +913,8 @@ class TranslationQueueManager(
         database.bookmarkDao().deleteBookmarksByBook(bookId)
         database.ttsRuleDao().deleteRulesByBook(bookId)
         database.bookDao().deleteBookById(bookId)
+        // A scrape project that was saved into this book now has no library copy.
+        database.scrapeProjectDao().unlinkBook(bookId)
 
         // Delete local files
         val bookDir = File(context.filesDir, "books/$bookId")

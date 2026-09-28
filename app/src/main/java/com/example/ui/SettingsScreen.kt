@@ -9,7 +9,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DarkMode
@@ -45,7 +47,8 @@ fun SettingsScreen(
     settings: AppSettings,
     onSaveSettings: (AppSettings) -> Unit,
     onCheckForUpdates: () -> Unit,
-    viewModel: MainViewModel? = null
+    viewModel: MainViewModel? = null,
+    onOpenScraperSettings: (() -> Unit)? = null
 ) {
     var isDarkMode by remember(settings) { mutableStateOf(settings.isDarkMode) }
     var workerCount by remember(settings) { mutableFloatStateOf(settings.workerCount.toFloat()) }
@@ -503,6 +506,34 @@ fun SettingsScreen(
                     onReorderRule = { id, up -> viewModel.reorderTtsRule(id, up) },
                     modifier = Modifier.testTag("tts_rules_settings_section")
                 )
+            }
+
+            // Chapter scraper settings live in the Scraper tab; this is a shortcut to them.
+            if (onOpenScraperSettings != null) {
+                Card(
+                    onClick = onOpenScraperSettings,
+                    modifier = Modifier.fillMaxWidth().testTag("settings_open_scraper"),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.TravelExplore,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Chapter scraper", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text(
+                                "Delay between chapters, reading limits, waiting for translation, browser",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                    }
+                }
             }
 
             // Worker Concurrency Card

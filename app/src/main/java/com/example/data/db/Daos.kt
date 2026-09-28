@@ -79,6 +79,9 @@ interface ChapterDao {
 
     @Query("DELETE FROM chapters WHERE bookId = :bookId")
     suspend fun deleteChaptersByBook(bookId: String)
+
+    @Query("DELETE FROM chapters WHERE id = :id")
+    suspend fun deleteChapterById(id: String)
 }
 
 data class BookTitleTuple(

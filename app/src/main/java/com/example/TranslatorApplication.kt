@@ -5,7 +5,11 @@ import android.util.Log
 import com.example.data.db.AppDatabase
 import com.example.data.db.toModel
 import com.example.data.repository.SettingsRepository
+import com.example.library.ScrapedLibraryBridge
 import com.example.queue.TranslationQueueManager
+import com.example.scraper.ScraperGraph
+import com.example.scraper.ScraperHost
+import com.example.scraper.data.ScraperRepository
 import com.example.service.TranslationService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -13,7 +17,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
-class TranslatorApplication : Application() {
+class TranslatorApplication : Application(), ScraperHost {
+
+    /** Created on first use of the Scraper tab (or its service), never at process start. */
+    override val scraperGraph: ScraperGraph by lazy {
+        ScraperGraph(
+            context = this,
+            repository = ScraperRepository(
+                db = database,
+                projects = database.scrapeProjectDao(),
+                chapters = database.scrapedChapterDao(),
+                sessions = database.scrapeSessionDao(),
+                strategies = database.siteStrategyDao(),
+                history = database.browserHistoryDao()
+            ),
+            libraryBridge = ScrapedLibraryBridge(this, database) { queueManager }
+        )
+    }
 
     lateinit var database: AppDatabase
         private set

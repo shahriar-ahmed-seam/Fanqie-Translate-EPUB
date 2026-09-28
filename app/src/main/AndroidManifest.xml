@@ -26,7 +26,13 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.MyApplication">
+        <!-- Keeps a chapter scrape running with the screen off; mirrors the scraper's state only. -->
+        <service
+            android:name=".scraper.service.ScrapeForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <service
             android:name=".service.TranslationService"
             android:enabled="true"
