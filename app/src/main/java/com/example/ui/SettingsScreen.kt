@@ -623,8 +623,8 @@ fun SettingsScreen(
                     Slider(
                         value = chunkSize,
                         onValueChange = { chunkSize = it },
-                        valueRange = 1000f..4800f,
-                        steps = 37,
+                        valueRange = 1000f..com.example.translation.TomatoMTLProvider.MAX_REQUEST_CHARS.toFloat(),
+                        steps = 31,
                         modifier = Modifier.testTag("chunk_size_slider")
                     )
 

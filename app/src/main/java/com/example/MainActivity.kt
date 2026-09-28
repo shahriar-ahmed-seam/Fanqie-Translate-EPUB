@@ -38,6 +38,9 @@ import com.example.ui.*
 import com.example.ui.theme.MyApplicationTheme
 import java.io.File
 
+/** Job states that count as "in the queue" for the Queue tab badge (workers set RUNNING while translating). */
+val ACTIVE_JOB_STATUSES = setOf("QUEUED", "RUNNING", "TRANSLATING", "PAUSING")
+
 enum class Screen(val title: String) {
     HOME("Home"),
     LIBRARY("Library"),
@@ -281,7 +284,7 @@ fun MainApp(
                         icon = {
                             BadgedBox(
                                 badge = {
-                                    val activeCount = booksWithJobs.count { it.job?.status == "TRANSLATING" || it.job?.status == "QUEUED" }
+                                    val activeCount = booksWithJobs.count { it.job?.status in ACTIVE_JOB_STATUSES }
                                     if (activeCount > 0) {
                                         Badge { Text("$activeCount") }
                                     }

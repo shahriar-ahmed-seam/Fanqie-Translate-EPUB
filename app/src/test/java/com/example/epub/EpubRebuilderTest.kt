@@ -107,4 +107,86 @@ class EpubRebuilderTest {
         assertEquals("Second translated paragraph.", pElements[1].text())
         assertEquals("Third translated paragraph.", pElements[2].text())
     }
+
+    private fun chunk(order: Int, source: List<String>, translated: List<String>?) = TranslationChunkEntity(
+        id = "c$order", jobId = "job", bookId = "book", chapterId = "ch", chapterOrder = 0, chunkOrder = order,
+        chunkType = "CHAPTER_BODY", sourceText = source.joinToString("\n\n"),
+        translatedText = translated?.joinToString("\n\n"), status = if (translated != null) "COMPLETED" else "PENDING"
+    )
+
+    /** Chunks exactly as the importer builds them from [xhtml] (current extraction). */
+    private fun importedParagraphs(xhtml: String) = EpubParser.extractTranslatableParagraphs(Jsoup.parse(xhtml))
+
+    private val novelChapter = """
+        <html><head><title>第一章</title></head><body>
+        <h1>第一章：初入江湖</h1>
+        <p>甲段。</p>
+        <blockquote><p>乙段信件。</p><p>丙段信件。</p></blockquote>
+        <h2>小标题</h2>
+        <p>丁段。</p>
+        <p>戊段。</p>
+        </body></html>
+    """.trimIndent()
+
+    @Test
+    fun headingsAndNestedBlocksStayAlignedWithTheirTranslations() {
+        val source = importedParagraphs(novelChapter)
+        assertEquals("nested blockquote paragraphs are extracted once", listOf("第一章：初入江湖", "甲段。", "乙段信件。", "丙段信件。", "小标题", "丁段。", "戊段。"), source)
+        val english = listOf("Chapter 1: Into the World", "Paragraph A.", "Letter B.", "Letter C.", "Subheading", "Paragraph D.", "Paragraph E.")
+        val chunks = listOf(chunk(0, source.take(4), english.take(4)), chunk(1, source.drop(4), english.drop(4)))
+
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(novelChapter, "Chapter 1: Entering the Martial World", chunks))
+
+        assertEquals("Chapter 1: Entering the Martial World", doc.select("h1").text())
+        assertEquals("Subheading", doc.select("h2").text())
+        assertEquals(listOf("Paragraph A.", "Letter B.", "Letter C.", "Paragraph D.", "Paragraph E."), doc.select("p").map { it.text() })
+        assertEquals(listOf("Letter B.", "Letter C."), doc.select("blockquote p").map { it.text() })
+    }
+
+    @Test
+    fun aChunkWhoseTranslationMergedParagraphsDoesNotShiftTheRestOfTheChapter() {
+        val source = importedParagraphs(novelChapter)
+        val chunks = listOf(
+            // Google merged "A" and "B" into one paragraph in the first chunk.
+            chunk(0, source.take(4), listOf("Chapter 1", "Paragraph A. Letter B.", "Letter C.")),
+            chunk(1, source.drop(4), listOf("Subheading", "Paragraph D.", "Paragraph E."))
+        )
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(novelChapter, "Chapter 1", chunks))
+        val paragraphs = doc.select("p").map { it.text() }
+        assertEquals(listOf("Paragraph A. Letter B.", "Letter C.", "Paragraph D.", "Paragraph E."), paragraphs)
+        assertFalse(doc.text().contains("段"))
+    }
+
+    @Test
+    fun booksImportedByOlderVersionsExportCorrectly() {
+        // v1.0.x extracted nested blocks twice: the blockquote itself and each paragraph in it.
+        val legacySource = listOf("第一章：初入江湖", "甲段。", "乙段信件。 丙段信件。", "乙段信件。", "丙段信件。", "小标题", "丁段。", "戊段。")
+        assertEquals(legacySource.size, EpubParser.legacyBlockElements(Jsoup.parse(novelChapter)).size)
+        val english = listOf("Chapter 1", "Paragraph A.", "Letters B and C.", "Letter B.", "Letter C.", "Subheading", "Paragraph D.", "Paragraph E.")
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(novelChapter, "Chapter 1", listOf(chunk(0, legacySource, english))))
+
+        assertEquals("Subheading", doc.select("h2").text())
+        assertEquals("Paragraph D.", doc.select("p").let { it[it.size - 2] }.text())
+        assertEquals("Paragraph E.", doc.select("p").last()!!.text())
+        assertFalse("no source text leaks", doc.text().contains("段"))
+    }
+
+    @Test
+    fun untranslatedChunksFallBackToTheSourceTextInPlace() {
+        val source = importedParagraphs(novelChapter)
+        val chunks = listOf(chunk(0, source.take(4), listOf("Chapter 1", "Paragraph A.", "Letter B.", "Letter C.")), chunk(1, source.drop(4), null))
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(novelChapter, "Chapter 1", chunks))
+        assertEquals(listOf("Paragraph A.", "Letter B.", "Letter C.", "丁段。", "戊段。"), doc.select("p").map { it.text() })
+    }
+
+    @Test
+    fun chaptersWithoutParagraphTagsAreSplitAtLineBreaksAndDoNotLeakSourceText() {
+        val xhtml = "<html><body><div class=\"txt\">第一行。<br/>第二行。<br/><br/>第三行。<img src=\"a.png\"/></div></body></html>"
+        val source = importedParagraphs(xhtml)
+        assertEquals(listOf("第一行。", "第二行。", "第三行。"), source)
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(xhtml, "Chapter 9", listOf(chunk(0, source, listOf("Line one.", "Line two.", "Line three.")))))
+        assertEquals(listOf("Line one.", "Line two.", "Line three."), doc.select("p").map { it.text() })
+        assertFalse(doc.text().contains("行"))
+        assertNotNull(doc.selectFirst("img[src=a.png]"))
+    }
 }

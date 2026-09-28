@@ -33,7 +33,10 @@ class TranslationQueueManager(
     private val settingsRepository: SettingsRepository
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
     private var provider: TranslationProvider = TomatoMTLProvider()
+    /** (timeout, workers) the current provider was built with. */
+    private var providerConfig: Pair<Int, Int>? = null
 
     private val activeWorkersCounter = AtomicInteger(0)
     private val _activeWorkers = MutableStateFlow(0)
@@ -120,12 +123,14 @@ class TranslationQueueManager(
     private fun ensureWorkerPool(settings: AppSettings) {
         val targetWorkerCount = settings.workerCount.coerceIn(1, 50)
 
-        // If provider settings changed or worker pool size changed, update provider
-        if (currentWorkerCount != targetWorkerCount) {
+        // Rebuild the provider when the timeout or the worker count changes (the timeout used to be ignored).
+        val config = settings.timeoutSeconds to targetWorkerCount
+        if (providerConfig != config) {
             provider = TomatoMTLProvider(
                 timeoutSeconds = settings.timeoutSeconds.toLong(),
                 maxConcurrentRequests = targetWorkerCount
             )
+            providerConfig = config
         }
 
         // Clean up completed/cancelled worker jobs
@@ -230,11 +235,14 @@ class TranslationQueueManager(
                         }
                     }
 
-                    // Execute translation task
-                    val (success, translatedText, error) = executeChunkWithRetry(
+                    // Execute translation task with the retry budget this chunk has left
+                    val outcome = executeChunkWithRetry(
                         chunk = chunk,
-                        maxRetries = settings.maxRetries
+                        remainingBudget = settings.maxRetries - chunk.retryCount
                     )
+                    val success = outcome.isSuccess
+                    val translatedText = outcome.translatedText
+                    val error = outcome.error
 
                     // Re-check database state in case the job was PAUSED or PAUSING while the chunk was in-flight
                     val jobAfterRequest = database.jobDao().getJobById(chunk.jobId)
@@ -253,11 +261,11 @@ class TranslationQueueManager(
                         isChunkCompleted = true
                     } else {
                         // Translation request failed
-                        if (isJobPausedOrPausing) {
-                            // If paused during execution, restore chunk to PENDING without consuming retries
+                        if (isJobPausedOrPausing || outcome.deferredByRateLimit) {
+                            // Paused mid-request, or only rate limited: back to PENDING without using retries
                             revertChunkToPending(chunk)
                         } else {
-                            val newRetryCount = chunk.retryCount + 1
+                            val newRetryCount = chunk.retryCount + outcome.failedAttempts.coerceAtLeast(1)
                             val status = if (newRetryCount >= settings.maxRetries) "FAILED" else "PENDING"
                             // Update chunk safely inside a transaction: only update if still TRANSLATING
                             // to guarantee completed chunks are NEVER overwritten!
@@ -376,53 +384,15 @@ class TranslationQueueManager(
 
     private suspend fun executeChunkWithRetry(
         chunk: TranslationChunkEntity,
-        maxRetries: Int
-    ): Triple<Boolean, String?, Throwable?> {
-        var lastError: Throwable? = null
-        val attempts = maxRetries.coerceAtLeast(1)
-
-        for (attempt in 1..attempts) {
-            try {
-                val result = provider.translate(chunk.sourceText, "zh", "en")
-                if (result.isSuccess && !result.getOrNull().isNullOrBlank()) {
-                    return Triple(true, result.getOrNull(), null)
-                }
-                lastError = result.exceptionOrNull() ?: IllegalStateException("Empty translation response")
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                lastError = e
-            }
-
-            // Do not retry permanent failures (e.g. 403 Forbidden, 400 Bad Request)
-            val translationEx = lastError as? TranslationException
-            if (translationEx?.isPermanent == true) {
-                Log.w("QueueManager", "Permanent non-retryable error for chunk ${chunk.id}: ${lastError?.message}")
-                break
-            }
-
-            if (attempt < attempts) {
-                // Calculate backoff delay with randomized jitter to prevent synchronized retry storms
-                val backoffMs = when {
-                    translationEx?.isRateLimited == true -> {
-                        val retryAfter = translationEx.retryAfterMs ?: (2000L * attempt)
-                        val jitter = (100L..500L).random()
-                        retryAfter + jitter
-                    }
-                    translationEx?.statusCode in 500..599 -> {
-                        // Exponential backoff for server errors: 1s, 2s, 4s, capped at 8s + jitter
-                        val base = (1000L * (1 shl (attempt - 1))).coerceAtMost(8000L)
-                        val jitter = (50L..250L).random()
-                        base + jitter
-                    }
-                    else -> {
-                        // Standard backoff: 500ms * attempt + jitter
-                        (500L * attempt) + (50L..200L).random()
-                    }
-                }
-                delay(backoffMs)
-            }
+        remainingBudget: Int
+    ): ChunkAttemptOutcome {
+        val outcome = translateWithRetry(remainingBudget = remainingBudget) {
+            provider.translate(chunk.sourceText, "zh", "en")
         }
-        return Triple(false, null, lastError)
+        if (!outcome.isSuccess) {
+            Log.w("QueueManager", "Chunk ${chunk.id} not translated (failed attempts=${outcome.failedAttempts}, deferred=${outcome.deferredByRateLimit}): ${outcome.error?.message}")
+        }
+        return outcome
     }
 
     /**

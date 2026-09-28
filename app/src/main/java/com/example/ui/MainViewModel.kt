@@ -364,37 +364,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                var exportFile = if (!exportedFilePath.isNullOrBlank()) File(exportedFilePath) else null
+                if (job == null || book == null) {
+                    _message.value = "Cannot export: book record not found"
+                    return@launch
+                }
 
-                // If export file doesn't exist or is empty or needs rebuilding, build it using streaming rebuilder
-                if (exportFile == null || !exportFile.exists() || exportFile.length() == 0L) {
-                    if (job == null || book == null) {
-                        _message.value = "Cannot export: book record not found"
-                        return@launch
-                    }
+                // Reuse an earlier export only if the translation hasn't changed since it was written
+                // (for example after "Retry failed" re-translated some chunks).
+                val cached = exportedFilePath?.takeIf { it.isNotBlank() }?.let { File(it) }
+                    ?.takeIf { isExportCacheValid(it, job) }
 
+                val exportFile = cached ?: run {
                     val titleChunk = database.chunkDao().getTitleChunk(job.id)
                     val translatedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: book.title
                     val exportName = "${com.example.epub.EpubRebuilder.sanitizeFileName(translatedTitle)}.epub"
-                    exportFile = File(bookDir, exportName)
+                    val file = File(bookDir, exportName)
 
                     com.example.epub.EpubRebuilder.rebuild(
                         sourceEpubFile = sourceEpubFile,
                         bookId = book.id,
                         jobId = job.id,
                         database = database,
-                        outputFile = exportFile
+                        outputFile = file
                     )
 
-                    database.jobDao().updateJob(
-                        job.copy(
-                            status = "COMPLETED",
-                            exportedUri = exportFile.absolutePath,
-                            exportedFileName = exportName,
-                            errorMessage = null,
-                            updatedAt = System.currentTimeMillis()
-                        )
-                    )
+                    // Exporting must never change the job's status: exporting mid-translation used to mark
+                    // the job COMPLETED, which stopped the translation.
+                    if (job.status == "COMPLETED") {
+                        database.jobDao().setExportedFile(job.id, file.absolutePath, exportName)
+                    }
+                    file
                 }
 
                 // Stream export file to Destination URI via SAF
@@ -694,6 +693,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
+        /** A previous export can be reused only for a completed job that hasn't changed since. */
+        fun isExportCacheValid(file: File, job: com.example.data.db.TranslationJobEntity): Boolean =
+            job.status == "COMPLETED" && file.exists() && file.length() > 0L && file.lastModified() >= job.updatedAt
+
         fun getFileNameFromUri(context: Context, uri: Uri): String {
             var name = "novel.epub"
             val cursor = context.contentResolver.query(uri, null, null, null, null)

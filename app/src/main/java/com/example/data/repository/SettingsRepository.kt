@@ -56,7 +56,7 @@ class SettingsRepository(context: Context) {
         return AppSettings(
             workerCount = prefs.getInt("worker_count", 20).coerceIn(1, 50),
             maxActiveBooks = prefs.getInt("max_active_books", 2).coerceIn(1, 5),
-            chunkSize = prefs.getInt("chunk_size", 4200).coerceIn(1000, 4800),
+            chunkSize = prefs.getInt("chunk_size", 4200).coerceIn(1000, com.example.translation.TomatoMTLProvider.MAX_REQUEST_CHARS),
             maxRetries = prefs.getInt("max_retries", 5).coerceIn(1, 10),
             timeoutSeconds = prefs.getInt("timeout_seconds", 30).coerceIn(5, 120),
             githubOwner = owner,
@@ -70,7 +70,7 @@ class SettingsRepository(context: Context) {
         val validated = AppSettings(
             workerCount = newSettings.workerCount.coerceIn(1, 50),
             maxActiveBooks = newSettings.maxActiveBooks.coerceIn(1, 5),
-            chunkSize = newSettings.chunkSize.coerceIn(1000, 4800),
+            chunkSize = newSettings.chunkSize.coerceIn(1000, com.example.translation.TomatoMTLProvider.MAX_REQUEST_CHARS),
             maxRetries = newSettings.maxRetries.coerceIn(1, 10),
             timeoutSeconds = newSettings.timeoutSeconds.coerceIn(5, 120),
             githubOwner = newSettings.githubOwner.trim().ifBlank { "shahriar-ahmed-seam" },
