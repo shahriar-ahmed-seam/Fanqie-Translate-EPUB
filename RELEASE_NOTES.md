@@ -1,19 +1,14 @@
 What's new
 
-Audiobook (TTS)
-- Playback keeps going with the screen off and the phone locked. Fixed the crashes that closed the app during long listening sessions (Android background limits).
-- If Android restarts the app, playback resumes at the paragraph where it stopped. If Android refuses, a notification offers one-tap Resume.
-- Reopening the app goes to the chapter you were actually listening to, not an old one.
-- Speech engine hiccups with the screen off retry automatically. Network voices fall back to an offline voice when the connection drops.
-- Auto-advance skips empty chapters and pauses before chapters that aren't translated yet.
-- Settings > Background listening: allow unrestricted battery use and share a diagnostics log.
+Tomato tab: download novels from Fanqie
+- New 🍅 tab. Search a Fanqie novel by its ID, a book link, or its title, and see the cover and details.
+- Download the novel (in the original Chinese) with one tap, or save it to a "download later" list.
+- Downloads keep running with the screen off. A downloaded book can be translated (it goes to your library like any other translation), added to the bookshelf to read in Chinese, re-downloaded, exported as EPUB, or deleted.
+- The downloader engine is fetched once from the open-source Fanqie Novel Downloader project and runs in its own process, so a problem there never affects the rest of the app. If Fanqie changes and downloads stop working, use "Check for update" in the Tomato tab settings.
 
-Scraper tab
-- New tab to collect chapters from novel websites in the built-in browser. It remembers history and your last position, has adjustable delays and site reading limits, and runs in the background.
-- Save scraped chapters to the Library to read and listen, or export them as EPUB.
+Also included (from 1.1)
+- Stable audiobook (TTS) playback with the screen off and the phone locked; resumes where it stopped.
+- Scraper tab for collecting chapters from novel websites.
+- Working in-app updates.
 
-Fixes
-- In-app updates work again: download, verify, install.
-- Translation retries, timeouts, chunk sizes and EPUB export alignment fixed. The Queue badge counts running books.
-
-Installing: this version installs over v1.0.11 and newer and keeps your library. v1.0.10 or older must be uninstalled first (different signing key).
+Installing: this version installs over 1.0.11 and newer and keeps your library. Versions 1.0.10 or older must be uninstalled first (different signing key). If you are on 1.0.22 or older, install this one manually once; updates after that appear in the app.
