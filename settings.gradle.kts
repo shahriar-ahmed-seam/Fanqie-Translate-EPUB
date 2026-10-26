@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 rootProject.name = "EPUB Translator"
 
 include(":app")
+include(":tomato-engine")

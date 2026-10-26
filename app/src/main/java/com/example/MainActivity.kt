@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.scraper.ScraperGraph
@@ -46,6 +47,7 @@ val ACTIVE_JOB_STATUSES = setOf("QUEUED", "RUNNING", "TRANSLATING", "PAUSING")
 enum class Screen(val title: String) {
     HOME("Home"),
     LIBRARY("Library"),
+    TOMATO("Tomato"),
     SCRAPER("Scraper"),
     QUEUE("Queue"),
     SETTINGS("Settings")
@@ -58,6 +60,8 @@ class MainActivity : ComponentActivity() {
     val pendingNotificationChapterId = mutableStateOf<String?>(null)
     /** Set when the scraper's notification is tapped. */
     val pendingOpenScraper = mutableStateOf(false)
+    /** Set when the Tomato download notification is tapped. */
+    val pendingOpenTomato = mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -87,7 +91,8 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel,
                     pendingNotificationBookId = pendingNotificationBookId,
                     pendingNotificationChapterId = pendingNotificationChapterId,
-                    pendingOpenScraper = pendingOpenScraper
+                    pendingOpenScraper = pendingOpenScraper,
+                    pendingOpenTomato = pendingOpenTomato
                 )
             }
         }
@@ -111,6 +116,9 @@ class MainActivity : ComponentActivity() {
         }
         if (intent.getBooleanExtra(ScraperGraph.EXTRA_OPEN_SCRAPER, false)) {
             pendingOpenScraper.value = true
+        }
+        if (intent.getBooleanExtra(com.example.tomato.TomatoDownloadService.EXTRA_OPEN_TOMATO, false)) {
+            pendingOpenTomato.value = true
         }
         consumeOpenExtras(intent)
     }
@@ -136,6 +144,7 @@ class MainActivity : ComponentActivity() {
         intent?.removeExtra(TtsPlaybackService.EXTRA_OPEN_BOOK_ID)
         intent?.removeExtra(TtsPlaybackService.EXTRA_OPEN_CHAPTER_ID)
         intent?.removeExtra(ScraperGraph.EXTRA_OPEN_SCRAPER)
+        intent?.removeExtra(com.example.tomato.TomatoDownloadService.EXTRA_OPEN_TOMATO)
     }
 }
 
@@ -144,7 +153,8 @@ fun MainApp(
     viewModel: MainViewModel,
     pendingNotificationBookId: MutableState<String?>? = null,
     pendingNotificationChapterId: MutableState<String?>? = null,
-    pendingOpenScraper: MutableState<Boolean>? = null
+    pendingOpenScraper: MutableState<Boolean>? = null,
+    pendingOpenTomato: MutableState<Boolean>? = null
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as? TranslatorApplication
@@ -191,6 +201,16 @@ fun MainApp(
             currentScreen = Screen.SCRAPER
             scraperViewModel.openBrowser()
             pendingOpenScraper.value = false
+        }
+    }
+
+    LaunchedEffect(pendingOpenTomato?.value) {
+        if (pendingOpenTomato?.value == true) {
+            activeReaderBookId = null
+            activeReaderChapterId = null
+            selectedBookIdForDetail = null
+            currentScreen = Screen.TOMATO
+            pendingOpenTomato.value = false
         }
     }
 
@@ -295,6 +315,13 @@ fun MainApp(
                         modifier = Modifier.testTag("nav_library")
                     )
                     NavigationBarItem(
+                        selected = currentScreen == Screen.TOMATO,
+                        onClick = { currentScreen = Screen.TOMATO },
+                        icon = { Text("\uD83C\uDF45", fontSize = 20.sp) },
+                        label = { Text("Tomato") },
+                        modifier = Modifier.testTag("nav_tomato")
+                    )
+                    NavigationBarItem(
                         selected = currentScreen == Screen.SCRAPER,
                         onClick = {
                             // Tapping the tab again returns to the scraper's first screen.
@@ -387,6 +414,11 @@ fun MainApp(
                         onRetryJob = { viewModel.retryFailed(it) },
                         onCancelJob = { viewModel.cancelJob(it) },
                         onExportEpub = onExport
+                    )
+                    Screen.TOMATO -> com.example.tomato.ui.TomatoRoot(
+                        viewModel = viewModel<com.example.tomato.ui.TomatoViewModel>(),
+                        onOpenLibraryBook = { bookId -> selectedBookIdForDetail = bookId },
+                        modifier = Modifier.consumeWindowInsets(innerPadding)
                     )
                     Screen.SCRAPER -> ScraperRoot(
                         viewModel = scraperViewModel,

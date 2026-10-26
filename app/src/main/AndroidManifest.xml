@@ -35,6 +35,11 @@
             android:name=".scraper.service.ScrapeForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- Keeps Tomato (Fanqie) downloads running in the background; stops when they finish. -->
+        <service
+            android:name=".tomato.TomatoDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <service
             android:name=".service.TranslationService"
             android:enabled="true"

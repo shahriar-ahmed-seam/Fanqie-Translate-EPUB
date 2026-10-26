@@ -18,8 +18,8 @@ class HomeLibraryActionRoutingTest {
     @Test
     fun testNavigationScreenEnumIncludesLibrary() {
         val screens = Screen.values().map { it.name }
-        // The Scraper tab sits between Library and Queue.
-        assertEquals(listOf("HOME", "LIBRARY", "SCRAPER", "QUEUE", "SETTINGS"), screens)
+        // The Tomato and Scraper tabs sit between Library and Queue.
+        assertEquals(listOf("HOME", "LIBRARY", "TOMATO", "SCRAPER", "QUEUE", "SETTINGS"), screens)
         assertEquals("Home", Screen.HOME.title)
         assertEquals("Library", Screen.LIBRARY.title)
         assertEquals("Queue", Screen.QUEUE.title)
