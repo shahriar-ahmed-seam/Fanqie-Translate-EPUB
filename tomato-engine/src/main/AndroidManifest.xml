@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application>
+        <!--
+            Hosts the Tomato engine (the Fanqie Novel Downloader's Rust core) in its own process, so a
+            crash in the engine can never stop the app or audiobook playback. Invisible, untouchable,
+            not exported.
+        -->
+        <activity
+            android:name="com.example.tomato.engine.TomatoEngineActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":tomato"
+            android:resizeableActivity="true"
+            android:taskAffinity="${applicationId}.tomato_engine"
+            android:theme="@style/Theme.TomatoEngine" />
+
+        <service
+            android:name="com.example.tomato.engine.TomatoEngineService"
+            android:exported="false"
+            android:process=":tomato" />
+
+        <!-- Starts ProcessLifecycleOwner in the engine process (the runtime follows it). -->
+        <provider
+            android:name="com.example.tomato.engine.TomatoEngineStartupProvider"
+            android:authorities="${applicationId}.tomato-engine-startup"
+            android:exported="false"
+            android:process=":tomato">
+            <meta-data
+                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+                android:value="androidx.startup" />
+        </provider>
+    </application>
+</manifest>

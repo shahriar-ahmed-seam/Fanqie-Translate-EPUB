@@ -15,6 +15,7 @@ import com.example.scraper.ScraperGraph
 import com.example.scraper.ScraperHost
 import com.example.scraper.data.ScraperRepository
 import com.example.service.TranslationService
+import com.example.tomato.engine.TomatoEngineProcess
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -60,6 +62,11 @@ class TranslatorApplication : Application(), ScraperHost {
     lateinit var ttsManager: com.example.tts.ReaderTtsManager
         private set
 
+    /** Tomato (Fanqie download) feature; created on first use of the Tomato tab. */
+    val tomatoGraph: com.example.tomato.TomatoGraph by lazy {
+        com.example.tomato.TomatoGraph(this, database) { queueManager }
+    }
+
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _isInForeground = MutableStateFlow(false)
@@ -77,6 +84,15 @@ class TranslatorApplication : Application(), ScraperHost {
         instance = this
         AppDiagnostics.init(this)
         installCrashLogger()
+
+        // The Tomato engine runs in its own process (":tomato"). The database, translation queue, TTS
+        // and services belong to the main process only; starting them there too would run a second
+        // translation queue against the same database.
+        if (TomatoEngineProcess.isEngineProcess(this)) {
+            TomatoEngineProcess.init(this)
+            return
+        }
+
         trackForeground()
 
         database = AppDatabase.getInstance(this)
@@ -116,8 +132,27 @@ class TranslatorApplication : Application(), ScraperHost {
         // process, which crashed background restarts on Android 12+ (foreground-service start refused)
         // and used up Android 15's daily dataSync limit, after which the system killed the whole app.
         keepTranslationServiceWithActiveJobs()
+        resumeTomatoDownloadsWhenVisible()
 
         applicationScope.launch { AppDiagnostics.recordProcessExits(this@TranslatorApplication) }
+    }
+
+    /**
+     * A Tomato download interrupted by the app being closed continues the next time the app is on
+     * screen (the engine needs a visible app to start). Does nothing if the Tomato tab was never used.
+     */
+    private fun resumeTomatoDownloadsWhenVisible() {
+        if (!com.example.tomato.TomatoGraph.wasUsed(this)) return
+        applicationScope.launch {
+            try {
+                isInForeground.first { it }
+                tomatoGraph.repository.resumeTracking()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.e("TranslatorApplication", "Couldn't resume Tomato downloads", e)
+            }
+        }
     }
 
     private fun keepTranslationServiceWithActiveJobs() {

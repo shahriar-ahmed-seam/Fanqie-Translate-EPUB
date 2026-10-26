@@ -166,77 +166,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun addEpubToLibraryInternal(uri: Uri, customFileName: String? = null): BookEntity = withContext(Dispatchers.IO) {
         val fileName = customFileName ?: getFileNameFromUri(getApplication(), uri)
-        val bookId = UUID.randomUUID().toString()
-        val bookDir = File(getApplication<Application>().filesDir, "books/$bookId").apply { mkdirs() }
-        val sourceEpubFile = File(bookDir, "source.epub")
-
-        // 1. Copy original file to persistent app storage
-        getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
-            sourceEpubFile.outputStream().use { output ->
-                input.copyTo(output, bufferSize = 32 * 1024)
-            }
-        } ?: throw IllegalStateException("Cannot open input stream for $uri")
-
-        // 2. Parse EPUB metadata and spine
-        val quickInfo = EpubParser.parseQuickInfo(sourceEpubFile)
-
-        // 3. Extract and persist cover
-        var coverPath: String? = null
-        if (quickInfo.coverBytes != null && quickInfo.coverBytes.isNotEmpty()) {
-            val ext = if (quickInfo.coverMediaType?.contains("png") == true) "png" else "jpg"
-            val coverFile = File(bookDir, "cover.$ext")
-            coverFile.writeBytes(quickInfo.coverBytes)
-            coverPath = coverFile.absolutePath
-        }
-
-        // 4. Create and insert BookEntity (bookType = LOCAL, totalChunks = 0)
-        val bookTitle = quickInfo.metadata.title.ifBlank { fileName.removeSuffix(".epub") }
-        val bookAuthor = quickInfo.metadata.author.ifBlank { "Unknown Author" }
-        val book = BookEntity(
-            id = bookId,
-            title = bookTitle,
-            author = bookAuthor,
-            description = quickInfo.metadata.description,
-            coverPath = coverPath,
-            originalUri = uri.toString(),
-            originalFileName = fileName,
-            chapterCount = quickInfo.spine.size,
-            totalChunks = 0,
-            createdAt = System.currentTimeMillis(),
-            sourceLanguage = quickInfo.metadata.language.ifBlank { "und" },
-            targetLanguage = "en",
-            bookType = BookType.LOCAL,
-            localFilePath = sourceEpubFile.absolutePath
-        )
-        database.bookDao().insertBook(book)
-        database.groupDao().insertCrossRef(
-            BookGroupCrossRefEntity(bookId = bookId, groupId = "default_local")
-        )
-
-        // 5. Parse TOC chapter titles and insert ChapterEntities
-        val tocTitles = EpubParser.extractTocChapterTitles(sourceEpubFile, quickInfo)
-        ZipFile(sourceEpubFile).use { zip ->
-            val chapters = quickInfo.spine.mapIndexed { index, spineItem ->
-                val title = EpubParser.resolveChapterTitle(
-                    zip = zip,
-                    opfDir = quickInfo.opfDirectory,
-                    href = spineItem.href,
-                    chapterOrder = index,
-                    tocTitles = tocTitles
-                )
-                ChapterEntity(
-                    id = UUID.randomUUID().toString(),
-                    bookId = bookId,
-                    chapterOrder = index,
-                    originalHref = spineItem.href,
-                    title = title,
-                    chunkCount = 0
-                )
-            }
-            database.chapterDao().insertChapters(chapters)
-        }
-
-        book
+        com.example.library.LocalBookImporter(getApplication(), database).import(uri, fileName)
     }
 
     fun addEpubToLibrary(uri: Uri) {
