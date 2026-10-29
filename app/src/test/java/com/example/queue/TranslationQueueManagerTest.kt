@@ -29,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** The real queue (workers, retries, automatic rounds, start-up repair) with a fake translation service. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+// A plain Application: the app's own (queue, TTS) isn't needed and would keep running after the test.
+@Config(sdk = [34], application = android.app.Application::class)
 class TranslationQueueManagerTest {
     private lateinit var context: Context
     private lateinit var db: AppDatabase

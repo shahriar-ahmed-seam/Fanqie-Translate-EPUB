@@ -19,7 +19,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+// A plain Application: the app's own (queue, TTS) isn't needed and would keep running after the test.
+@Config(sdk = [34], application = android.app.Application::class)
 class StoredTranslationRepairTest {
     private lateinit var db: AppDatabase
 

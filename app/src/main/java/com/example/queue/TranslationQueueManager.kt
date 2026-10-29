@@ -177,8 +177,8 @@ class TranslationQueueManager(
      * the app stops or Google starts limiting requests.
      */
     private suspend fun improveStoredTranslationsInBackground() {
-        if (maintenancePrefs.getBoolean(KEY_QUALITY_IMPROVE_DONE, false)) return
         try {
+            if (maintenancePrefs.getBoolean(KEY_QUALITY_IMPROVE_DONE, false)) return
             val improver = StoredTranslationImprover(database, chunkTranslator) {
                 // Books being translated come first.
                 runnableJobsAvailable.first { !it }
