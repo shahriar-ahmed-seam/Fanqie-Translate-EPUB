@@ -203,7 +203,7 @@ class TranslationService : Service() {
                 queueManager.activeWorkers,
                 settingsRepository.settings
             ) { allJobs, allBooks, titleChunks, activeWorkers, settings ->
-                val titleMap = titleChunks.associate { it.bookId to it.translatedText?.takeIf { t -> t.isNotBlank() } }
+                val titleMap = titleChunks.associate { it.bookId to com.example.translation.TranslationQuality.usableTitle(it.translatedText) }
                 NotificationState(
                     jobs = allJobs,
                     books = allBooks.associateBy { it.id },

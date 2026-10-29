@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.data.db.AppDatabase
 import com.example.data.db.ChapterEntity
 import com.example.epub.EpubParser
+import com.example.translation.TranslationQuality
 import java.io.File
 
 /** Whether a loaded chapter has real text to read, or only a placeholder for the reader screen. */
@@ -80,13 +81,14 @@ object ChapterContentLoader : ChapterTransitionProvider {
             }
 
             val titleChunk = chunks.firstOrNull { it.chunkType == "CHAPTER_TITLE" }
-            val resolvedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() }
+            val resolvedTitle = TranslationQuality.usableTitle(titleChunk?.translatedText, titleChunk?.sourceText)
                 ?: if (chapter.title.any { it.code in 0x4e00..0x9fff }) "Chapter ${chapter.chapterOrder + 1}" else chapter.title
 
             val bodyChunks = chunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
             val extractedParagraphs = mutableListOf<String>()
             for (chunk in bodyChunks) {
-                val text = chunk.translatedText?.takeIf { it.isNotBlank() } ?: continue
+                // Junk such as `[""]` (stored by older versions) is never shown or read aloud.
+                val text = TranslationQuality.usable(chunk.translatedText, chunk.sourceText) ?: continue
                 val rawParas = text.split(Regex("(\r?\n)+|<p[^>]*>|</p>|<br\\s*/?>"))
                 for (p in rawParas) {
                     val clean = p.replace(Regex("<[^>]+>"), "").trim()
@@ -96,15 +98,20 @@ object ChapterContentLoader : ChapterTransitionProvider {
                 }
             }
 
-            val finalParagraphs = if (extractedParagraphs.isNotEmpty()) {
-                extractedParagraphs
-            } else {
-                listOf("This chapter has not been translated yet. Please wait for translation to complete.")
+            val finalParagraphs = when {
+                extractedParagraphs.isNotEmpty() -> extractedParagraphs
+                // A cover or picture page: there is nothing to translate (it used to say "not translated yet").
+                bodyChunks.isEmpty() -> listOf("This page has no text.")
+                else -> listOf("This chapter has not been translated yet. Please wait for translation to complete.")
             }
 
             // Chunks still waiting for (or in) translation mean the chapter isn't complete yet. Failed
             // chunks won't change by waiting, so a chapter with only those left counts as readable.
-            val stillTranslating = bodyChunks.any { it.status == "PENDING" || it.status == "TRANSLATING" }
+            // (A chunk being translated again still has its earlier text, so it is readable.)
+            val stillTranslating = bodyChunks.any {
+                (it.status == "PENDING" || it.status == "TRANSLATING") &&
+                    TranslationQuality.usable(it.translatedText, it.sourceText) == null
+            }
             val status = when {
                 stillTranslating -> ChapterContentStatus.UNTRANSLATED
                 extractedParagraphs.isEmpty() && bodyChunks.isNotEmpty() -> ChapterContentStatus.UNTRANSLATED

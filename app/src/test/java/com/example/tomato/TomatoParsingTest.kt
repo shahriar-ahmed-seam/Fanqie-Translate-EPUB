@@ -37,6 +37,67 @@ class TomatoParsingTest {
     }
 
     @Test
+    fun idsInOtherDigitScriptsAndWithInvisibleCharactersAreNormalized() {
+        val id = "7668238796625808408"
+        assertEquals(id, TomatoIds.extract("７６６８２３８７９６６２５８０８４０８"))
+        assertEquals(id, TomatoIds.extract("৭৬৬৮২৩৮৭৯৬৬২৫৮০৮৪০৮"))
+        assertEquals(id, TomatoIds.extract("٧٦٦٨٢٣٨٧٩٦٦٢٥٨٠٨٤٠٨"))
+        assertEquals(id, TomatoIds.extract("\u202A$id\u202C"))
+        assertEquals(id, TomatoIds.extract("76682\u200B38796625808408"))
+        assertEquals(id, TomatoIds.extract("7668-2387-9662-5808-408"))
+        assertEquals(id, TomatoIds.extract("《反派》 番茄小说 $id"))
+        assertEquals(id, TomatoIds.extract("https://fanqienovel.com/page/$id?enter_from=x"))
+        // A number glued to letters, or two IDs, isn't a usable ID.
+        assertNull(TomatoIds.extract("76682387966258084O8"))
+        assertNull(TomatoIds.extract("$id 7681662091668753470"))
+        assertEquals(listOf(id, "7681662091668753470"), TomatoIds.allIds("$id 7681662091668753470"))
+        // Found by v1.2.0, so they must keep working: encoded links (redirects) and an "ID" prefix.
+        assertEquals(id, TomatoIds.extract("https://www.google.com/url?sa=t&url=https%3A%2F%2Ffanqienovel.com%2Fpage%2F$id&usg=x"))
+        assertEquals(id, TomatoIds.extract("https://changdunovel.com/wap/share-v2.html%3Fbook_id%3D$id%26share_id%3D1"))
+        assertEquals(id, TomatoIds.extract("https%253A%252F%252Ffanqienovel.com%252Fpage%252F$id"))
+        assertEquals(id, TomatoIds.extract("ID$id"))
+        assertEquals(id, TomatoIds.extract("ID:$id"))
+        assertFalse(TomatoIds.looksLikeBrokenId("ID$id"))
+        assertTrue(TomatoIds.looksLikeBrokenId("76682387966258084O8"))
+        assertTrue(TomatoIds.looksLikeBrokenId("766823879662"))
+        assertFalse(TomatoIds.looksLikeBrokenId(id))
+        assertFalse(TomatoIds.looksLikeBrokenId("1984"))
+        assertFalse(TomatoIds.looksLikeBrokenId("2024年3月15日 第1234567890章"))
+        assertFalse(TomatoIds.looksLikeBrokenId("Chapter 1234567890 begins"))
+    }
+
+    @Test
+    fun engineErrorsAreSorted() {
+        // The engine's real answer for an unknown ID (seen live).
+        val unknown = "所有内容接口均不可用：provider=app host=reading.snssdk.com path=/bookapi/multi-detail/v category=missing_book；" +
+            "provider=redcandle host=api5-sinfonlinec.jxbhmy.com path=/bookapi/multi-detail/v category=http_client_error"
+        assertEquals(EngineErrorKind.NOT_FOUND, classifyEngineError(com.example.tomato.engine.EngineCallException(unknown)))
+        assertEquals(EngineErrorKind.TRANSIENT, classifyEngineError(com.example.tomato.engine.EngineCallException("应用正在初始化，请稍后")))
+        assertEquals(EngineErrorKind.TRANSIENT, classifyEngineError(com.example.tomato.engine.EngineUnavailableException("The Tomato engine stopped. Try again.")))
+        assertEquals(EngineErrorKind.OTHER, classifyEngineError(com.example.tomato.engine.EngineCallException("参数错误")))
+    }
+
+    @Test
+    fun fanqieBookPageIsParsed() {
+        val html = javaClass.getResource("/tomato/fanqie_page_7668238796625808408.html")!!.readText()
+        val book = FanqieBookPage.parse(html, "7668238796625808408")!!
+        assertEquals("反派：开局纳妾，气运之子叫我爹", book.title)
+        assertEquals("等文昌下雪", book.author)
+        assertEquals(130, book.chapterCount)
+        assertEquals(297_633L, book.wordCount)
+        assertEquals("传统玄幻", book.category)
+        assertEquals("连载中", book.serialStatus)
+        assertEquals(1_791_712_601L, book.lastChapterTime)
+        assertTrue(book.coverUrl.startsWith("https://"))
+        assertTrue(book.abstractText.isNotBlank())
+        // The page of another ID, or of an unknown one, gives nothing.
+        assertNull(FanqieBookPage.parse(html, "7681662091668753470"))
+        val unknown = javaClass.getResource("/tomato/fanqie_page_unknown.html")!!.readText()
+        assertNull(FanqieBookPage.parse(unknown, "7000000000000000001"))
+        assertNull(FanqieBookPage.parse("<html>blocked</html>", "7668238796625808408"))
+    }
+
+    @Test
     fun engineBookDetailIsParsed() {
         val json = JSONObject(
             """{"abstract":"简介","author":"杀虫队队员","book_id":"7143038691944959011","book_name":"十日终焉","category":"",

@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.data.db.AppDatabase
 import com.example.data.db.ChapterEntity
 import com.example.data.db.TranslationChunkEntity
+import com.example.translation.TranslationQuality
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.parser.Parser
@@ -164,13 +165,22 @@ object EpubRebuilder {
                 allChapters.sortedBy { it.chapterOrder }
             }
 
+            // The archive's real entry names. Chapters are matched to the entry they were read from at
+            // import (URL-encoded or differently cased hrefs used to leave whole chapters in Chinese).
+            val entryIndex = ZipEntryIndex(sourceZip)
+            val opfEntryName = opfEntry.name.replace('\\', '/').trimStart('/')
+            val ncxEntryName = fullNcxPath?.let { entryIndex.find(it) ?: it }
+            val navEntryName = fullNavPath?.let { entryIndex.find(it) ?: it }
+
             val allOriginalChapterPaths = allChapters.flatMap {
-                listOf(it.originalHref, EpubParser.resolveZipPath(opfDir, it.originalHref))
+                listOfNotNull(it.originalHref, EpubParser.resolveZipPath(opfDir, it.originalHref), entryIndex.resolve(opfDir, it.originalHref))
             }.toSet()
+            val allChaptersByHref = allChapters.associateBy { it.originalHref }
 
             // Map chapter Hrefs and Paths
             val chapterPathToEntityMap = mutableMapOf<String, ChapterEntity>()
-            val chapterTitleMap = mutableMapOf<String, String>() // href/id -> translated title
+            val chapterTitleMap = mutableMapOf<String, String>() // href/id -> title for the table of contents
+            val translatedChapterTitles = mutableMapOf<String, String>() // chapter id -> real translation only
 
             // Batch fetch all chapter title chunks in a single query to minimize memory and DB roundtrips
             val chapterTitleChunks = database.chunkDao().getChapterTitleChunks(jobId).associateBy { it.chapterId }
@@ -179,21 +189,28 @@ object EpubRebuilder {
                 val fullPath = EpubParser.resolveZipPath(opfDir, chapter.originalHref)
                 chapterPathToEntityMap[fullPath] = chapter
                 chapterPathToEntityMap[chapter.originalHref] = chapter
+                entryIndex.resolve(opfDir, chapter.originalHref)?.let { chapterPathToEntityMap[it] = chapter }
 
-                // Try to find translated chapter title
+                // Translated chapter title; an untranslated (Chinese) one shows as "Chapter N" like in the reader
                 val titleChunk = chapterTitleChunks[chapter.id]
-                val translatedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: chapter.title
-                chapterTitleMap[chapter.originalHref] = translatedTitle
-                chapterTitleMap[chapter.id] = translatedTitle
-                chapterTitleMap[fullPath] = translatedTitle
+                val translated = TranslationQuality.usableTitle(titleChunk?.translatedText, titleChunk?.sourceText)
+                if (translated != null) translatedChapterTitles[chapter.id] = translated
+                val tocTitle = translated ?: fallbackChapterTitle(chapter)
+                chapterTitleMap[chapter.originalHref] = tocTitle
+                chapterTitleMap[chapter.id] = tocTitle
+                chapterTitleMap[fullPath] = tocTitle
+                chapterTitleMap[hrefKey(fullPath)] = tocTitle
             }
 
             // Get translated Book Title and Description
-            val baseTitle = database.chunkDao().getTitleChunk(jobId)?.translatedText?.takeIf { it.isNotBlank() }
+            val originalBookTitle = opfDoc.select("metadata > dc\\:title, metadata > title").text().ifBlank { book?.title.orEmpty() }
+            val titleChunk = database.chunkDao().getTitleChunk(jobId)
+            val baseTitle = TranslationQuality.usableTitle(titleChunk?.translatedText, titleChunk?.sourceText)
                 ?: book?.title ?: opfDoc.select("metadata > dc\\:title, metadata > title").text().ifBlank { "Untitled" }
             val translatedBookTitle = customTitle ?: baseTitle
 
-            val translatedBookDesc = database.chunkDao().getDescriptionChunk(jobId)?.translatedText?.takeIf { it.isNotBlank() }
+            val descChunk = database.chunkDao().getDescriptionChunk(jobId)
+            val translatedBookDesc = TranslationQuality.usable(descChunk?.translatedText, descChunk?.sourceText)
                 ?: book?.description ?: opfDoc.select("metadata > dc\\:description, metadata > description").text()
 
             // 4. Stream Zip Writing directly to temporary file
@@ -222,7 +239,7 @@ object EpubRebuilder {
 
                     when {
                         // 1. OPF Entry -> Rebuild OPF with English metadata and preserved cover & filtered spine
-                        cleanEntryName == opfPath || cleanEntryName.equals(opfPath, ignoreCase = true) -> {
+                        cleanEntryName == opfEntryName || cleanEntryName == opfPath || cleanEntryName.equals(opfPath, ignoreCase = true) -> {
                             val rebuiltOpf = rebuildOpfXml(
                                 originalOpfXml = originalOpfXml,
                                 translatedTitle = translatedBookTitle,
@@ -237,27 +254,31 @@ object EpubRebuilder {
                         }
 
                         // 2. NCX TOC Entry -> Rebuild NCX with translated title & chapters
-                        fullNcxPath != null && (cleanEntryName == fullNcxPath || cleanEntryName.equals(fullNcxPath, ignoreCase = true)) -> {
+                        fullNcxPath != null && (cleanEntryName == ncxEntryName || cleanEntryName == fullNcxPath || cleanEntryName.equals(fullNcxPath, ignoreCase = true)) -> {
                             val origNcxXml = sourceZip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
                             val rebuiltNcx = rebuildNcxXml(
                                 originalNcxXml = origNcxXml,
                                 translatedBookTitle = translatedBookTitle,
                                 chapterTitleMap = chapterTitleMap,
                                 chaptersToExport = if (!selectedChapterIds.isNullOrEmpty()) chaptersToExport else null,
-                                opfDir = opfDir
+                                opfDir = opfDir,
+                                tocDir = cleanEntryName.substringBeforeLast('/', "")
                             )
                             writeZipEntry(zos, cleanEntryName, rebuiltNcx.toByteArray(Charsets.UTF_8))
                             writtenEntries.add(cleanEntryName)
                         }
 
                         // 3. EPUB3 Nav Entry -> Rebuild Nav with translated titles
-                        fullNavPath != null && (cleanEntryName == fullNavPath || cleanEntryName.equals(fullNavPath, ignoreCase = true)) -> {
+                        fullNavPath != null && (cleanEntryName == navEntryName || cleanEntryName == fullNavPath || cleanEntryName.equals(fullNavPath, ignoreCase = true)) -> {
                             val origNavXml = sourceZip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
                             val rebuiltNav = rebuildNavXml(
                                 originalNavXml = origNavXml,
                                 chapterTitleMap = chapterTitleMap,
                                 chaptersToExport = if (!selectedChapterIds.isNullOrEmpty()) chaptersToExport else null,
-                                opfDir = opfDir
+                                opfDir = opfDir,
+                                tocDir = cleanEntryName.substringBeforeLast('/', ""),
+                                translatedBookTitle = translatedBookTitle,
+                                originalBookTitle = originalBookTitle
                             )
                             writeZipEntry(zos, cleanEntryName, rebuiltNav.toByteArray(Charsets.UTF_8))
                             writtenEntries.add(cleanEntryName)
@@ -271,7 +292,8 @@ object EpubRebuilder {
                             if (chapterEntity != null) {
                                 val rawChapterXhtml = sourceZip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
                                 val chapterChunks = database.chunkDao().getChunksByJobAndChapter(jobId, chapterEntity.id)
-                                val translatedChapterTitle = chapterTitleMap[chapterEntity.originalHref] ?: chapterEntity.title
+                                // Only a real translation replaces the heading (it is translated with the body too).
+                                val translatedChapterTitle = translatedChapterTitles[chapterEntity.id].orEmpty()
 
                                 val rebuiltXhtml = rebuildChapterXhtml(
                                     rawXhtml = rawChapterXhtml,
@@ -284,7 +306,7 @@ object EpubRebuilder {
                         }
 
                         // If it is an unselected chapter file, omit writing it to keep partial EPUB clean
-                        !selectedChapterIds.isNullOrEmpty() && (allOriginalChapterPaths.contains(cleanEntryName) || isChapterEntry(cleanEntryName, allChapters.associateBy { it.originalHref })) -> {
+                        !selectedChapterIds.isNullOrEmpty() && (allOriginalChapterPaths.contains(cleanEntryName) || isChapterEntry(cleanEntryName, allChaptersByHref)) -> {
                             // Skip unselected chapter file
                         }
 
@@ -375,8 +397,9 @@ object EpubRebuilder {
         // 2. Pair each body chunk's source paragraphs with its translated paragraphs.
         val bodyChunks = chapterChunks.filter { it.chunkType == "CHAPTER_BODY" }.sortedBy { it.chunkOrder }
         val groups = bodyChunks.map { chunk ->
+            // Junk such as `[""]` counts as untranslated: the source stays in place instead.
             splitParagraphs(chunk.sourceText) to
-                splitParagraphs(chunk.translatedText?.takeIf { it.isNotBlank() } ?: chunk.sourceText)
+                splitParagraphs(TranslationQuality.usable(chunk.translatedText, chunk.sourceText) ?: chunk.sourceText)
         }
         val sourceParagraphs = groups.flatMap { it.first }
 
@@ -397,7 +420,12 @@ object EpubRebuilder {
                     it.normalName() !in HEADING_TAGS && it.select("img, svg, image").isEmpty()
                 }
                 val translated = groups.flatMap { it.second }
-                if (blocks.isNotEmpty()) {
+                val hasBlocks = EpubParser.textBlockElements(doc).isNotEmpty()
+                if (hasBlocks && isLineImport(doc, sourceParagraphs.map(::normalized))) {
+                    // Imported line by line (text outside block tags next to headings or paragraphs):
+                    // each translated line replaces its source line where it is.
+                    applyLineTranslation(doc.body(), groups)
+                } else if (blocks.isNotEmpty()) {
                     applyTranslation(blocks, translated, doc)
                 } else {
                     // Text without block tags (<br>/<div> layout): drop the source text, keep images.
@@ -407,16 +435,86 @@ object EpubRebuilder {
             }
         }
 
-        // 4. The dedicated chapter-title translation wins over the heading's body translation.
+        // 4. The dedicated chapter-title translation wins over the heading's body translation. Without
+        //    one, the heading keeps its body translation (it used to be overwritten with the Chinese
+        //    title) and the page title follows it.
         if (translatedTitle.isNotBlank()) {
             doc.title(translatedTitle)
             doc.select("h1, h2, h3, .chapter-title, .title").firstOrNull { it.text().isNotBlank() }?.text(translatedTitle)
+        } else {
+            val heading = doc.select("h1, h2, h3").firstOrNull { it.text().isNotBlank() }?.text()?.trim()
+            if (heading != null && TranslationQuality.hanCount(heading) == 0 && TranslationQuality.hanCount(doc.title()) > 0) {
+                doc.title(heading)
+            }
         }
 
         return doc.html()
     }
 
+    /** "Chapter N" for a chapter whose title wasn't translated (as the reader shows it). */
+    private fun fallbackChapterTitle(chapter: ChapterEntity): String =
+        if (TranslationQuality.hanCount(chapter.title) > 0) "Chapter ${chapter.chapterOrder + 1}" else chapter.title
+
+    /** Decodes %XX escapes only ('+' stays a plus, unlike URLDecoder). */
+    internal fun percentDecode(text: String): String {
+        if (!text.contains('%')) return text
+        val bytes = java.io.ByteArrayOutputStream(text.length)
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '%' && i + 2 < text.length && text[i + 1].isHexDigitChar() && text[i + 2].isHexDigitChar()) {
+                bytes.write(text.substring(i + 1, i + 3).toInt(16))
+                i += 3
+            } else {
+                val count = Character.charCount(text.codePointAt(i))
+                val encoded = text.substring(i, i + count).toByteArray(Charsets.UTF_8)
+                bytes.write(encoded, 0, encoded.size)
+                i += count
+            }
+        }
+        return String(bytes.toByteArray(), Charsets.UTF_8)
+    }
+
+    private fun Char.isHexDigitChar(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+    /** Key for comparing hrefs: decoded, no fragment, forward slashes, no leading slash. */
+    internal fun hrefKey(href: String): String =
+        percentDecode(href.substringBefore('#').substringBefore('?')).replace('\\', '/').trimStart('/')
+
+    /**
+     * Resolves paths to the archive's real entry names: exact, then URL-decoded, then ignoring case.
+     * Built once per export (looking up case-insensitively used to scan every entry each time).
+     */
+    internal class ZipEntryIndex(zip: ZipFile) {
+        private val names = mutableSetOf<String>()
+        private val byLowerCase = mutableMapOf<String, String>()
+
+        init {
+            val entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory) continue
+                val name = entry.name.replace('\\', '/').trimStart('/')
+                names += name
+                byLowerCase.putIfAbsent(name.lowercase(), name)
+            }
+        }
+
+        fun find(path: String): String? {
+            val clean = path.replace('\\', '/').trimStart('/')
+            if (clean in names) return clean
+            val decoded = percentDecode(clean)
+            if (decoded in names) return decoded
+            return byLowerCase[clean.lowercase()] ?: byLowerCase[decoded.lowercase()]
+        }
+
+        fun resolve(baseDir: String, href: String): String? = find(EpubParser.resolveZipPath(baseDir, href))
+    }
+
     private val HEADING_TAGS = setOf("h1", "h2", "h3", "h4", "h5", "h6")
+
+    /** "Contents" headings of Chinese tables of contents. */
+    private val CONTENTS_HEADINGS = setOf("目录", "目錄", "目次")
 
     private fun splitParagraphs(text: String): List<String> =
         text.split(Regex("\n\n+")).map { it.trim() }.filter { it.isNotBlank() }
@@ -431,7 +529,71 @@ object EpubRebuilder {
         val expected = sourceParagraphs.map(::normalized)
         val candidates = listOf(EpubParser.textBlockElements(doc), EpubParser.legacyBlockElements(doc))
         candidates.firstOrNull { list -> list.map { normalized(it.text()) } == expected }?.let { return it }
+        // Imported line by line (text outside block tags): matching blocks by count would be wrong.
+        if (isLineImport(doc, expected)) return null
         return candidates.firstOrNull { it.size == expected.size }
+    }
+
+    /** True when the stored paragraphs are the chapter's lines (see EpubParser.extractTranslatableParagraphs). */
+    private fun isLineImport(doc: Document, expectedNormalized: List<String>): Boolean {
+        val body = doc.body() ?: return false
+        return EpubParser.textLines(body).map(::normalized) == expectedNormalized
+    }
+
+    /**
+     * Puts translated lines where their source lines are (a line is the text between line breaks and
+     * block edges, as EpubParser.textLines reads it), so headings, line breaks and pictures stay in
+     * place. When Google merged or split a chunk's lines, its translation goes into its first line.
+     */
+    private fun applyLineTranslation(body: org.jsoup.nodes.Element, groups: List<Pair<List<String>, List<String>>>) {
+        val lines = lineTextNodes(body)
+        var index = 0
+        for ((source, translated) in groups) {
+            val chunkLines = lines.subList(index.coerceAtMost(lines.size), (index + source.size).coerceAtMost(lines.size))
+            index += source.size
+            if (chunkLines.isEmpty()) continue
+            if (translated.size == chunkLines.size) {
+                chunkLines.forEachIndexed { i, nodes -> setLineText(nodes, translated[i]) }
+            } else {
+                setLineText(chunkLines.first(), translated.joinToString(" "))
+                chunkLines.drop(1).forEach { setLineText(it, "") }
+            }
+        }
+    }
+
+    /** The text nodes of each non-blank line of [root], split exactly like EpubParser.textLines. */
+    private fun lineTextNodes(root: org.jsoup.nodes.Element): List<List<org.jsoup.nodes.TextNode>> {
+        val lines = mutableListOf<List<org.jsoup.nodes.TextNode>>()
+        var current = mutableListOf<org.jsoup.nodes.TextNode>()
+        val buffer = StringBuilder()
+        fun flush() {
+            if (buffer.isNotBlank()) lines += current
+            current = mutableListOf()
+            buffer.setLength(0)
+        }
+        org.jsoup.select.NodeTraversor.traverse(object : org.jsoup.select.NodeVisitor {
+            override fun head(node: org.jsoup.nodes.Node, depth: Int) {
+                when (node) {
+                    is org.jsoup.nodes.TextNode -> if (!EpubParser.isInNonText(node)) {
+                        buffer.append(node.text())
+                        current += node
+                    }
+                    is org.jsoup.nodes.Element -> if (node.normalName() == "br") flush()
+                }
+            }
+
+            override fun tail(node: org.jsoup.nodes.Node, depth: Int) {
+                if (node is org.jsoup.nodes.Element && node.isBlock) flush()
+            }
+        }, root)
+        flush()
+        return lines
+    }
+
+    private fun setLineText(nodes: List<org.jsoup.nodes.TextNode>, text: String) {
+        // The translation goes into the line's first text node with text, the rest are emptied.
+        val target = nodes.firstOrNull { it.text().isNotBlank() } ?: nodes.first()
+        nodes.forEach { it.text(if (it === target) text else "") }
     }
 
     /** Puts [translated] into [elements] in order; extra paragraphs become new <p> siblings, surplus elements are removed. */
@@ -574,12 +736,23 @@ object EpubRebuilder {
         return doc.html()
     }
 
+    /**
+     * The title for a table-of-contents link: by the link's path resolved from the TOC file's folder
+     * (decoded), then by the href as written, then the old suffix match.
+     */
+    private fun tocTitle(href: String, tocDir: String, chapterTitleMap: Map<String, String>): String? =
+        chapterTitleMap[hrefKey(EpubParser.resolveZipPath(tocDir, href))]
+            ?: chapterTitleMap[href]
+            ?: chapterTitleMap[hrefKey(href)]
+            ?: chapterTitleMap.entries.firstOrNull { href.endsWith(it.key) || it.key.endsWith(href) }?.value
+
     private fun rebuildNcxXml(
         originalNcxXml: String,
         translatedBookTitle: String,
         chapterTitleMap: Map<String, String>,
         chaptersToExport: List<ChapterEntity>? = null,
-        opfDir: String = ""
+        opfDir: String = "",
+        tocDir: String = opfDir
     ): String {
         val doc = Jsoup.parse(originalNcxXml, "", Parser.xmlParser())
         doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml).charset(Charsets.UTF_8)
@@ -598,8 +771,7 @@ object EpubRebuilder {
         // Update & filter navPoints
         for (navPoint in doc.select("navPoint")) {
             val contentSrc = navPoint.select("content").attr("src").substringBefore('#')
-            val translated = chapterTitleMap[contentSrc]
-                ?: chapterTitleMap.entries.firstOrNull { contentSrc.endsWith(it.key) || it.key.endsWith(contentSrc) }?.value
+            val translated = tocTitle(contentSrc, tocDir, chapterTitleMap)
 
             if (allowedHrefs != null) {
                 val isAllowed = allowedHrefs.contains(contentSrc) ||
@@ -623,10 +795,27 @@ object EpubRebuilder {
         originalNavXml: String,
         chapterTitleMap: Map<String, String>,
         chaptersToExport: List<ChapterEntity>? = null,
-        opfDir: String = ""
+        opfDir: String = "",
+        tocDir: String = opfDir,
+        translatedBookTitle: String = "",
+        originalBookTitle: String = ""
     ): String {
         val doc = Jsoup.parse(originalNavXml, "", Parser.htmlParser())
         doc.outputSettings().syntax(Document.OutputSettings.Syntax.xml).charset(Charsets.UTF_8)
+
+        // The page's own title and headings (not the links): the book title and "目录" were left in Chinese.
+        if (translatedBookTitle.isNotBlank()) {
+            fun englishFor(text: String): String? = when {
+                TranslationQuality.hanCount(text) == 0 -> null
+                normalized(text) == normalized(originalBookTitle) -> translatedBookTitle
+                normalized(text).replace(" ", "") in CONTENTS_HEADINGS -> "Contents"
+                else -> null
+            }
+            englishFor(doc.title())?.let { doc.title(it) }
+            doc.select("h1, h2, h3, h4, h5, h6").filter { it.select("a").isEmpty() }.forEach { heading ->
+                englishFor(heading.text())?.let { heading.text(it) }
+            }
+        }
 
         val allowedHrefs = chaptersToExport?.flatMap {
             listOf(
@@ -638,8 +827,7 @@ object EpubRebuilder {
 
         for (a in doc.select("nav a[href]")) {
             val href = a.attr("href").substringBefore('#')
-            val translated = chapterTitleMap[href]
-                ?: chapterTitleMap.entries.firstOrNull { href.endsWith(it.key) || it.key.endsWith(href) }?.value
+            val translated = tocTitle(href, tocDir, chapterTitleMap)
 
             if (allowedHrefs != null) {
                 val isAllowed = allowedHrefs.contains(href) ||

@@ -4,6 +4,9 @@ import com.example.translation.TranslationException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
+/** First pause after an empty or untranslated answer; doubles with each further one. */
+internal const val SOFT_FAILURE_BACKOFF_MS = 2_000L
+
 /** Result of translating one chunk within one claim. */
 data class ChunkAttemptOutcome(
     val translatedText: String?,
@@ -59,11 +62,13 @@ suspend fun translateWithRetry(
 
         failures++
         if (ex?.isPermanent == true || failures >= budget) return ChunkAttemptOutcome(null, lastError, failures)
-        val backoff = if (ex?.statusCode in 500..599) {
-            (1_000L * (1L shl (failures - 1))).coerceAtMost(8_000L) + jitter(50L..250L)
-        } else {
-            500L * failures + jitter(50L..200L)
+        val backoff = when {
+            ex?.statusCode in 500..599 -> (1_000L * (1L shl (failures - 1))).coerceAtMost(8_000L) + jitter(50L..250L)
+            // Empty or untranslated answers: Google is overloaded. Give it longer each time.
+            ex?.isSoftFailure == true -> (SOFT_FAILURE_BACKOFF_MS * (1L shl (failures - 1))).coerceAtMost(16_000L) + jitter(100L..400L)
+            else -> 500L * failures + jitter(50L..200L)
         }
-        sleep(backoff)
+        // The service asked for a longer wait (for example after answering with a web page).
+        sleep(maxOf(backoff, ex?.retryAfterMs ?: 0L))
     }
 }

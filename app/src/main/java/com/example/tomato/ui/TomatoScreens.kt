@@ -181,10 +181,15 @@ private fun TomatoHomeScreen(viewModel: TomatoViewModel, snackbar: SnackbarHostS
                     item(key = "results_header") {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                if (state.byId) "Novel found" else "${state.books.size} results",
+                                when {
+                                    state.byId && state.lookedUpId != null -> "Novel with ID ${state.lookedUpId}"
+                                    state.byId -> "Novel found"
+                                    state.query != null -> "${state.books.size} results for \"${state.query}\""
+                                    else -> "${state.books.size} results"
+                                },
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier.weight(1f).testTag("tomato_results_header")
                             )
                             TextButton(onClick = viewModel::clearResults) { Text("Clear") }
                         }
