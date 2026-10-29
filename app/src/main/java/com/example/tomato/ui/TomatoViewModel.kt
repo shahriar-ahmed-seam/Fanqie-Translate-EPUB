@@ -28,7 +28,13 @@ import java.io.File
 sealed interface LookupUi {
     data object Idle : LookupUi
     data object Loading : LookupUi
-    data class Results(val books: List<TomatoBook>, val byId: Boolean) : LookupUi
+    /** [lookedUpId]: the ID that was looked up; [query]: the title that was searched for. */
+    data class Results(
+        val books: List<TomatoBook>,
+        val byId: Boolean,
+        val lookedUpId: String? = null,
+        val query: String? = null
+    ) : LookupUi
     data class Message(val text: String, val isError: Boolean) : LookupUi
 }
 
@@ -86,7 +92,12 @@ class TomatoViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             _lookup.value = try {
                 when (val result = repository.lookup(text)) {
-                    is LookupResult.Found -> LookupUi.Results(result.books, result.byId)
+                    is LookupResult.Found -> LookupUi.Results(
+                        books = result.books,
+                        byId = result.byId,
+                        lookedUpId = result.lookedUpId,
+                        query = if (result.byId) null else text
+                    )
                     is LookupResult.NotFound -> LookupUi.Message(result.message, isError = false)
                 }
             } catch (e: CancellationException) {

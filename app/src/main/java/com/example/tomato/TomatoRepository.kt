@@ -57,7 +57,8 @@ sealed interface EngineSetup {
 }
 
 sealed interface LookupResult {
-    data class Found(val books: List<TomatoBook>, val byId: Boolean) : LookupResult
+    /** [lookedUpId] is the ID that was looked up (null for a title search). */
+    data class Found(val books: List<TomatoBook>, val byId: Boolean, val lookedUpId: String? = null) : LookupResult
     data class NotFound(val message: String) : LookupResult
 }
 
@@ -79,7 +80,11 @@ class TomatoRepository(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    /** Fanqie's public book pages: the ID lookup's fallback when the engine can't answer. */
+    private val bookPage: TomatoBookPageSource = FanqieBookPage(httpClient),
+    /** Waits between engine retries of an ID lookup (the engine may still be starting). */
+    private val lookupRetryDelaysMs: List<Long> = listOf(1_500L, 3_000L)
 ) {
     private val dao = database.books()
     private val root = File(context.filesDir, "tomato")
@@ -189,34 +194,110 @@ class TomatoRepository(
 
     // ── Lookup ────────────────────────────────────────────────────────────
 
-    /** A novel ID or book link looks the book up directly; anything else searches by title. */
+    /**
+     * A novel ID or book link looks the book up directly; anything else searches by title. Numbers
+     * never go to the title search: Fanqie's search returns unrelated novels for them.
+     */
     suspend fun lookup(input: String): LookupResult = withContext(Dispatchers.IO) {
-        val text = input.trim()
-        if (text.isEmpty()) return@withContext LookupResult.NotFound("Enter a novel ID, link or title.")
-        val id = TomatoIds.extract(text)
-        if (id != null) {
-            val book = try {
-                fetchBook(id)
-            } catch (e: EngineCallException) {
-                null
-            }
-            return@withContext if (book != null) {
-                LookupResult.Found(listOf(book), byId = true)
-            } else {
-                LookupResult.NotFound("No Fanqie novel has the ID $id.")
-            }
+        // Normalized digits and spaces are only used to find IDs; a title search gets what the user
+        // typed (without invisible characters).
+        val typed = TomatoIds.stripInvisible(input).trim()
+        val text = TomatoIds.normalize(input).trim()
+        if (text.isEmpty() || typed.isEmpty()) return@withContext LookupResult.NotFound("Enter a novel ID, link or title.")
+        val id = TomatoIds.extract(input)
+        if (id != null) return@withContext lookupById(id)
+        val ids = TomatoIds.allIds(text)
+        if (ids.size > 1) {
+            return@withContext LookupResult.NotFound("That text has more than one novel ID (${ids.joinToString(", ")}). Enter one of them.")
+        }
+        if (TomatoIds.looksLikeBrokenId(text)) {
+            val digits = TomatoIds.digitsOnly(text)
+            return@withContext LookupResult.NotFound(
+                if (digits != null) {
+                    "$digits isn't a novel ID: it has ${digits.length} digits, and Fanqie novel IDs have ${TomatoIds.USUAL_LENGTH}. Check the number."
+                } else {
+                    "\"$text\" isn't a novel ID: IDs are only digits (0-9). Check for letters such as O or l."
+                }
+            )
         }
         if (TomatoIds.looksLikeLink(text)) {
             return@withContext LookupResult.NotFound("That link doesn't contain a novel ID. Open the book's page and copy that link.")
         }
-        val results = TomatoJson.parseSearch(JSONObject(engine.call("search", JSONObject().put("q", text))))
-        if (results.isEmpty()) LookupResult.NotFound("No novels found for \"$text\".") else LookupResult.Found(results, byId = false)
+        val results = TomatoJson.parseSearch(JSONObject(engine.call("search", JSONObject().put("q", typed))))
+        if (results.isEmpty()) LookupResult.NotFound("No novels found for \"$typed\".") else LookupResult.Found(results, byId = false)
     }
 
-    /** Full book info; null when Fanqie doesn't know the ID. */
-    suspend fun fetchBook(bookId: String): TomatoBook? = withContext(Dispatchers.IO) {
-        val reply = engine.call("book_detail", JSONObject().put("book_id", bookId).put("include_chapters", false))
-        TomatoJson.parseBook(JSONObject(reply))?.takeIf { it.bookId == bookId && it.title.isNotBlank() }
+    /**
+     * The engine's book info, retried while the engine is still starting; then Fanqie's public page.
+     * A valid ID used to be reported as unknown whenever the engine had any problem.
+     */
+    private suspend fun lookupById(id: String): LookupResult {
+        var engineError: Exception? = null
+        try {
+            fetchBook(id, retry = true)?.let { return LookupResult.Found(listOf(it), byId = true, lookedUpId = id) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            engineError = e
+            Log.w(TAG, "Engine lookup of $id failed", e)
+        }
+        val page = bookPage.fetch(id)
+        if (page is BookPageResult.Found) {
+            AppDiagnostics.log("tomato", "ID $id found on Fanqie's website (engine: ${engineError?.message ?: "no match"})")
+            return LookupResult.Found(listOf(page.book), byId = true, lookedUpId = id)
+        }
+        val engineSaysUnknown = engineError == null || classifyEngineError(engineError) == EngineErrorKind.NOT_FOUND
+        return LookupResult.NotFound(
+            when {
+                page == BookPageResult.NotFound ->
+                    "No Fanqie novel has the ID $id. Check the number, or copy the link from the novel's page."
+                engineSaysUnknown ->
+                    "No Fanqie novel was found for the ID $id. Check the number. (Fanqie's website couldn't be reached to double-check: ${(page as BookPageResult.Failed).message}.)"
+                else ->
+                    "Couldn't look up the ID $id right now: ${readable(engineError!!)}. Check your internet connection and try again."
+            }
+        )
+    }
+
+    /**
+     * Full book info; null when Fanqie doesn't know the ID (or the engine answered about another
+     * book). With [retry], errors that pass (engine starting, timeouts, network) are retried.
+     */
+    suspend fun fetchBook(bookId: String, retry: Boolean = false): TomatoBook? = withContext(Dispatchers.IO) {
+        for (wait in if (retry) lookupRetryDelaysMs else emptyList()) {
+            val started = System.currentTimeMillis()
+            try {
+                return@withContext fetchBookOnce(bookId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Only quick failures are retried (engine still starting). A slow one (a timeout)
+                // would keep the user waiting; the caller asks Fanqie's website instead.
+                val quick = System.currentTimeMillis() - started < QUICK_FAILURE_MS
+                if (!quick || classifyEngineError(e) != EngineErrorKind.TRANSIENT) throw e
+                Log.i(TAG, "book_detail for $bookId failed (${e.message}); retrying")
+                delay(wait)
+            }
+        }
+        fetchBookOnce(bookId)
+    }
+
+    private suspend fun fetchBookOnce(bookId: String): TomatoBook? {
+        val reply = engine.call(
+            "book_detail",
+            JSONObject().put("book_id", bookId).put("include_chapters", false),
+            LOOKUP_TIMEOUT_MS
+        )
+        val book = try {
+            TomatoJson.parseBook(JSONObject(reply))
+        } catch (e: org.json.JSONException) {
+            throw EngineCallException("The Tomato engine sent an unreadable answer")
+        }
+        if (book != null && book.bookId != bookId) {
+            AppDiagnostics.log("tomato", "Engine answered book ${book.bookId} for ID $bookId; ignored")
+            return null
+        }
+        return book?.takeIf { it.title.isNotBlank() }
     }
 
     /** Refreshes the stored info of a saved or downloaded book (title, chapter count...). */
@@ -598,7 +679,27 @@ class TomatoRepository(
         const val TAG = "TomatoRepository"
         const val MAX_POLL_FAILURES = 6
         const val MISSING_JOB_ROUNDS = 8
+        const val LOOKUP_TIMEOUT_MS = 30_000L
+        /** Engine failures faster than this are worth retrying during a lookup. */
+        const val QUICK_FAILURE_MS = 10_000L
     }
+}
+
+internal enum class EngineErrorKind { TRANSIENT, NOT_FOUND, OTHER }
+
+/** Sorts an engine failure: worth retrying, a definite "no such book", or anything else. */
+internal fun classifyEngineError(error: Exception): EngineErrorKind {
+    if (error is EngineUnavailableException) return EngineErrorKind.TRANSIENT
+    val message = error.message.orEmpty().lowercase()
+    // "missing_book": the engine's main provider has no such book (seen live for unknown IDs).
+    val notFound = listOf("missing_book", "不存在", "未找到", "找不到", "已下架", "下架", "not found", "no such book", "does not exist")
+    if (notFound.any { it in message }) return EngineErrorKind.NOT_FOUND
+    val transient = listOf(
+        "初始化", "稍后", "繁忙", "超时", "网络", "连接", "请求失败",
+        "initializ", "took too long", "timeout", "timed out", "network", "connect", "dns",
+        "error sending request", "try again", "busy", "stopped", "reset", "unreachable", "temporarily"
+    )
+    return if (transient.any { it in message }) EngineErrorKind.TRANSIENT else EngineErrorKind.OTHER
 }
 
 /** Production engine access through the engine process. */

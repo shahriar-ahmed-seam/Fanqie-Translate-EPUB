@@ -477,9 +477,54 @@ object EpubParser {
      */
     fun extractTranslatableParagraphs(doc: Document): List<String> {
         val blocks = textBlockElements(doc)
-        if (blocks.isNotEmpty()) return blocks.map { it.text().trim() }
-        val body = doc.body() ?: return emptyList()
+        val body = doc.body() ?: return blocks.map { it.text().trim() }
+        if (blocks.isNotEmpty() && !hasSubstantialLooseText(body)) return blocks.map { it.text().trim() }
+        // No block tags, or most of the text sits outside them (a heading followed by lines split with
+        // <br> inside a <div>): read it line by line. Taking only the blocks used to drop the story
+        // text, so it was never translated and stayed in Chinese.
         return textLines(body)
+    }
+
+    /**
+     * True when a lot of the chapter's text is outside paragraph-like blocks: at least
+     * [LOOSE_TEXT_MIN_CHARS] characters and a fifth of all text.
+     */
+    fun hasSubstantialLooseText(body: Element): Boolean {
+        var loose = 0
+        var total = 0
+        org.jsoup.select.NodeTraversor.traverse({ node, _ ->
+            if (node is TextNode && !isInNonText(node)) {
+                val length = node.text().trim().length
+                if (length > 0) {
+                    total += length
+                    if (!isInsideBlock(node)) loose += length
+                }
+            }
+        }, body)
+        return loose >= LOOSE_TEXT_MIN_CHARS && loose * 5 >= total
+    }
+
+    private const val LOOSE_TEXT_MIN_CHARS = 100
+    private val BLOCK_TAGS = setOf("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "dt", "dd")
+    private val NON_TEXT_TAGS = setOf("script", "style", "title", "head", "noscript")
+
+    internal fun isInNonText(node: org.jsoup.nodes.Node): Boolean {
+        var parent = node.parent()
+        while (parent is Element) {
+            if (parent.normalName() in NON_TEXT_TAGS) return true
+            parent = parent.parent()
+        }
+        return false
+    }
+
+    private fun isInsideBlock(node: org.jsoup.nodes.Node): Boolean {
+        var parent = node.parent()
+        while (parent is Element) {
+            val name = parent.normalName()
+            if (name in BLOCK_TAGS || name in NON_TEXT_TAGS) return true
+            parent = parent.parent()
+        }
+        return false
     }
 
     /** Visible text of [root] split at <br> and block boundaries. */
@@ -488,7 +533,7 @@ object EpubParser {
         org.jsoup.select.NodeTraversor.traverse(object : org.jsoup.select.NodeVisitor {
             override fun head(node: org.jsoup.nodes.Node, depth: Int) {
                 when (node) {
-                    is org.jsoup.nodes.TextNode -> sb.append(node.text())
+                    is org.jsoup.nodes.TextNode -> if (!isInNonText(node)) sb.append(node.text())
                     is Element -> if (node.normalName() == "br") sb.append('\n')
                 }
             }

@@ -26,6 +26,8 @@ interface TranslationJobDao {
     @Query("SELECT * FROM translation_jobs ORDER BY updatedAt DESC")
     fun getAllJobs(): Flow<List<TranslationJobEntity>>
 
+    @Query("SELECT * FROM translation_jobs ORDER BY startedAt ASC")
+    suspend fun getAllJobsOnce(): List<TranslationJobEntity>
     @Query("SELECT * FROM translation_jobs WHERE id = :id")
     suspend fun getJobById(id: String): TranslationJobEntity?
 
@@ -59,6 +61,20 @@ interface TranslationJobDao {
     /** Records the cached export file without touching status or updatedAt. */
     @Query("UPDATE translation_jobs SET exportedUri = :path, exportedFileName = :fileName WHERE id = :jobId")
     suspend fun setExportedFile(jobId: String, path: String, fileName: String)
+    /** Forgets a cached export (the next export is built again), without touching status or updatedAt. */
+    @Query("UPDATE translation_jobs SET exportedUri = NULL, exportedFileName = NULL WHERE id = :jobId")
+    suspend fun clearExportCache(jobId: String)
+    @Query("UPDATE translation_jobs SET exportedUri = NULL, exportedFileName = NULL")
+    suspend fun clearAllExportCaches()
+    /**
+     * Puts a finished (or failed) book back in the queue, behind the books queued now. Returns 0 when
+     * it isn't finished any more (for example a worker is on it).
+     */
+    @Query("UPDATE translation_jobs SET status = 'QUEUED', errorMessage = NULL, startedAt = :timestamp, updatedAt = :timestamp WHERE id = :jobId AND status IN ('COMPLETED', 'FAILED')")
+    suspend fun requeueIfFinished(jobId: String, timestamp: Long = System.currentTimeMillis()): Int
+    /** Finished or failed books that still have chunks waiting (never picked up otherwise) go back in the queue. */
+    @Query("UPDATE translation_jobs SET status = 'QUEUED', errorMessage = NULL, updatedAt = :timestamp WHERE status IN ('COMPLETED', 'FAILED') AND EXISTS (SELECT 1 FROM translation_chunks c WHERE c.jobId = translation_jobs.id AND c.status IN ('PENDING', 'TRANSLATING'))")
+    suspend fun requeueFinishedJobsWithWaitingChunks(timestamp: Long = System.currentTimeMillis()): Int
 
     @Query("DELETE FROM translation_jobs WHERE id = :id")
     suspend fun deleteJobById(id: String)
@@ -239,6 +255,20 @@ interface TranslationChunkDao {
 
     @Query("SELECT COUNT(*) FROM translation_chunks WHERE jobId = :jobId")
     suspend fun getTotalChunkCount(jobId: String): Int
+    /**
+     * The job's chunks after (afterChapter, afterChunk) in reading order, one page at a time (keyset
+     * paging on the jobId/chapterOrder/chunkOrder index; stable while statuses change during a scan).
+     */
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND (chapterOrder > :afterChapter OR (chapterOrder = :afterChapter AND chunkOrder > :afterChunk)) ORDER BY chapterOrder ASC, chunkOrder ASC LIMIT :limit")
+    suspend fun getChunksPageByJob(jobId: String, afterChapter: Int, afterChunk: Int, limit: Int): List<TranslationChunkEntity>
+    /** Sends a completed chunk whose stored text is unusable (`[""]`) back to be translated again. */
+    @Query("UPDATE translation_chunks SET status = 'PENDING', translatedText = NULL, retryCount = 0, errorMessage = :reason, updatedAt = :timestamp WHERE id = :id AND status = 'COMPLETED'")
+    suspend fun requeueCompletedChunk(id: String, reason: String, timestamp: Long = System.currentTimeMillis()): Int
+    @Query("UPDATE translation_chunks SET translatedText = :text, updatedAt = :timestamp WHERE id = :id AND status = 'COMPLETED'")
+    suspend fun replaceCompletedTranslation(id: String, text: String, timestamp: Long = System.currentTimeMillis()): Int
+    /** Completed chunks whose text may be junk (empty, raw `[...]` answers, language codes at the end). */
+    @Query("SELECT * FROM translation_chunks WHERE jobId = :jobId AND status = 'COMPLETED' AND (translatedText IS NULL OR TRIM(translatedText) = '' OR translatedText LIKE '[%' OR translatedText LIKE '%zh-CN' OR translatedText LIKE '%zh-TW')")
+    suspend fun getSuspiciousCompletedChunks(jobId: String): List<TranslationChunkEntity>
 
     @Query("DELETE FROM translation_chunks WHERE jobId = :jobId")
     suspend fun deleteChunksByJob(jobId: String)

@@ -262,10 +262,13 @@ fun ReaderScreen(
         withContext(Dispatchers.IO) {
             val book = db.bookDao().getBookById(bookId)
             val titleChunk = db.chunkDao().getTitleChunkByBook(bookId)
-            novelTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: book?.title ?: ""
+            novelTitle = com.example.translation.TranslationQuality.usableTitle(titleChunk?.translatedText, titleChunk?.sourceText)
+                ?: book?.title ?: ""
 
             val titleChunks = db.chunkDao().getChapterTitlesByBook(bookId)
-            chapterTitlesMap = titleChunks.associate { it.chapterId to (it.translatedText ?: "") }
+            chapterTitlesMap = titleChunks.associate {
+                it.chapterId to (com.example.translation.TranslationQuality.usableTitle(it.translatedText) ?: "")
+            }
         }
     }
 

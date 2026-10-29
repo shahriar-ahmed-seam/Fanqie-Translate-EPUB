@@ -71,6 +71,13 @@ fun NovelDetailScreen(
     var translatedTitle by remember { mutableStateOf<String?>(null) }
     var translatedDescription by remember { mutableStateOf<String?>(null) }
     var chapterProgressMap by remember { mutableStateOf<Map<String, Pair<Int, Int>>>(emptyMap()) } // chapterId -> (completed, total)
+    var chapterProgressLoaded by remember { mutableStateOf(false) }
+    // Chapters with text chunks are translated when all of them are. A chapter without any (a cover
+    // or picture page) has nothing to translate; it used to count as untranslated ("131 / 132 ch").
+    val isChapterTranslated: (String) -> Boolean = { chapterId ->
+        val prog = chapterProgressMap[chapterId]
+        if (prog == null) chapterProgressLoaded else prog.second == 0 || prog.first >= prog.second
+    }
     var chapterTitlesMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     var lastReadChapterId by remember(bookId) { mutableStateOf(viewModel.getLastReadChapterId(bookId)) }
@@ -82,16 +89,19 @@ fun NovelDetailScreen(
     LaunchedEffect(bookId, currentBookJob?.job?.id) {
         withContext(Dispatchers.IO) {
             val titleChunk = db.chunkDao().getTitleChunkByBook(bookId)
-            translatedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() }
+            translatedTitle = com.example.translation.TranslationQuality.usableTitle(titleChunk?.translatedText, titleChunk?.sourceText)
 
             val descChunk = db.chunkDao().getDescriptionChunkByBook(bookId)
-            translatedDescription = descChunk?.translatedText?.takeIf { it.isNotBlank() }
+            translatedDescription = com.example.translation.TranslationQuality.usable(descChunk?.translatedText, descChunk?.sourceText)
 
             val titleChunks = db.chunkDao().getChapterTitlesByBook(bookId)
-            chapterTitlesMap = titleChunks.associate { it.chapterId to (it.translatedText ?: "") }
+            chapterTitlesMap = titleChunks.associate {
+                it.chapterId to (com.example.translation.TranslationQuality.usableTitle(it.translatedText) ?: "")
+            }
 
             val progressList = db.chunkDao().getChapterBodyProgressByBook(bookId)
             chapterProgressMap = progressList.associate { it.chapterId to Pair(it.completedChunks, it.totalChunks) }
+            chapterProgressLoaded = true
         }
     }
 
@@ -141,10 +151,7 @@ fun NovelDetailScreen(
     val isLocalBook = currentBookJob?.book?.isLocalBook == true || currentBookJob?.job == null
 
     val totalChapters = chapters.size
-    val translatedChaptersCount = if (isLocalBook) totalChapters else chapters.count { chapter ->
-        val prog = chapterProgressMap[chapter.id]
-        prog != null && prog.second > 0 && prog.first >= prog.second
-    }
+    val translatedChaptersCount = if (isLocalBook) totalChapters else chapters.count { chapter -> isChapterTranslated(chapter.id) }
 
     // Grouping by 100 chapters
     val chapterGroups = remember(chapters) {
@@ -164,12 +171,9 @@ fun NovelDetailScreen(
     }
 
     // Memoize translated counts per chapter group to avoid O(N) calculations during scrolling/recomposition
-    val groupProgressCounts = remember(chapterGroups, chapterProgressMap, isLocalBook) {
+    val groupProgressCounts = remember(chapterGroups, chapterProgressMap, chapterProgressLoaded, isLocalBook) {
         chapterGroups.associate { group ->
-            group.groupIndex to if (isLocalBook) group.chapters.size else group.chapters.count { ch ->
-                val prog = chapterProgressMap[ch.id]
-                prog != null && prog.second > 0 && prog.first >= prog.second
-            }
+            group.groupIndex to if (isLocalBook) group.chapters.size else group.chapters.count { ch -> isChapterTranslated(ch.id) }
         }
     }
 
@@ -608,7 +612,7 @@ fun NovelDetailScreen(
                         val isSelected = selectedChapterIds.contains(chapter.id)
                         val isLastRead = chapter.id == lastReadChapterId
                         val prog = chapterProgressMap[chapter.id]
-                        val isFullyTranslated = isLocalBook || (prog != null && prog.second > 0 && prog.first >= prog.second)
+                        val isFullyTranslated = isLocalBook || isChapterTranslated(chapter.id)
 
                         ChapterListItem(
                             chapterNumber = chapter.chapterOrder + 1,
@@ -680,7 +684,7 @@ fun NovelDetailScreen(
                             val isSelected = selectedChapterIds.contains(chapter.id)
                             val isLastRead = chapter.id == lastReadChapterId
                             val prog = chapterProgressMap[chapter.id]
-                            val isFullyTranslated = isLocalBook || (prog != null && prog.second > 0 && prog.first >= prog.second)
+                            val isFullyTranslated = isLocalBook || isChapterTranslated(chapter.id)
 
                             ChapterListItem(
                                 chapterNumber = chapter.chapterOrder + 1,

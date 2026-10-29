@@ -21,8 +21,17 @@ class TomatoMTLProvider(
     override val name: String = "TomatoMTL (Google Engine)"
 
     companion object {
+        private const val TAG = "TomatoMTLProvider"
+
         /** Longest text sent in one request; the chunk size setting can't exceed it. */
         const val MAX_REQUEST_CHARS = 4200
+
+        /** Pause for every worker after Google answered with nothing usable (it does that when overloaded). */
+        private const val SOFT_FAILURE_COOLDOWN_MS = 2_000L
+        /** Pause after Google answered with a web page (its "unusual traffic" check) instead of JSON. */
+        private const val BLOCKED_PAGE_COOLDOWN_MS = 20_000L
+        /** Requests at least this long pause every worker when the answer is unusable. */
+        private const val SHARED_COOLDOWN_MIN_CHARS = 600
 
         @Volatile
         private var rateLimitUntil = 0L
@@ -32,6 +41,39 @@ class TomatoMTLProvider(
             if (target > rateLimitUntil) {
                 rateLimitUntil = target
             }
+        }
+
+        /**
+         * Text of a `translate_a/t` answer: `["text"]`, or `[["text","zh-CN"]]` when Google detected the
+         * language. An empty translation is `[""]`; it returns "" and never the raw body (that is how
+         * `[""]` ended up stored as whole chapters).
+         */
+        internal fun parseTEndpoint(body: String): String {
+            val root = JSONArray(body)
+            val sb = StringBuilder()
+            for (i in 0 until root.length()) {
+                when (val item = root.opt(i)) {
+                    is String -> sb.append(item)
+                    is JSONArray -> (item.opt(0) as? String)?.let { sb.append(it) }
+                }
+            }
+            return sb.toString()
+        }
+
+        /**
+         * Text of a `translate_a/single` answer: only the translated pieces of `d[0]` (`d[0][i][0]`).
+         * The rest of the answer holds the detected language and confidence values, which the old
+         * parser glued to the text ("Chapter 1 Empty Housezh-CN").
+         */
+        internal fun parseSingleEndpoint(body: String): String {
+            val root = JSONArray(body)
+            val segments = root.opt(0) as? JSONArray ?: return ""
+            val sb = StringBuilder()
+            for (i in 0 until segments.length()) {
+                val segment = segments.opt(i) as? JSONArray ?: continue
+                (segment.opt(0) as? String)?.let { sb.append(it) }
+            }
+            return sb.toString()
         }
     }
 
@@ -104,42 +146,73 @@ class TomatoMTLProvider(
     }
 
     private fun translateSingleBlock(text: String, sl: String, tl: String): Result<String> {
+        // Nothing Chinese in it (numbers, symbols, English): keep it as it is.
+        if (!TranslationQuality.needsTranslation(text)) return Result.success(text)
+
         // Attempt translation via TomatoMTL's Google Translation Engine
         val primaryResult = runCatching {
             executeTomatoMtlGoogleEngine(text, sl, tl)
         }
-
-        if (primaryResult.isSuccess && !primaryResult.getOrNull().isNullOrBlank()) {
-            return Result.success(primaryResult.getOrNull()!!)
+        val primaryText = primaryResult.getOrNull()
+        if (primaryText != null && TranslationQuality.looksTranslated(text, primaryText)) {
+            return Result.success(TranslationQuality.usable(primaryText, text) ?: text)
         }
 
         val primaryError = primaryResult.exceptionOrNull()
-        // If primary engine hit 429 rate limit or 403 blocked, do not immediately hammer fallback engine
-        if (primaryError is TranslationException && (primaryError.isRateLimited || primaryError.isPermanent)) {
-            Log.w("TomatoMTLProvider", "Primary engine non-recoverable status: ${primaryError.message}")
+        // If primary engine hit 429 rate limit, 403 blocked or a web page, do not immediately hammer fallback engine
+        if (primaryError is TranslationException && (primaryError.isRateLimited || primaryError.isPermanent || primaryError.retryAfterMs != null)) {
+            Log.w(TAG, "Primary engine non-recoverable status: ${primaryError.message}")
             return Result.failure(primaryError)
         }
 
-        // Secondary fallback to single translation endpoint
+        // Secondary fallback to single translation endpoint (also used when the primary answer was
+        // empty or still Chinese)
         val secondaryResult = runCatching {
             executeFallbackEngine(text, sl, tl)
         }
-
-        if (secondaryResult.isSuccess && !secondaryResult.getOrNull().isNullOrBlank()) {
-            return Result.success(secondaryResult.getOrNull()!!)
+        val secondaryText = secondaryResult.getOrNull()
+        if (secondaryText != null && TranslationQuality.looksTranslated(text, secondaryText)) {
+            return Result.success(TranslationQuality.usable(secondaryText, text) ?: text)
         }
 
-        val error = secondaryResult.exceptionOrNull() ?: primaryError
-        ?: TranslationException("Translation returned empty text from engine.")
+        // Neither answer is clean, but one is a real (partial) translation: return the one with the
+        // least Chinese left; the queue re-translates the paragraphs that are still Chinese.
+        val bestEffort = listOfNotNull(primaryText, secondaryText)
+            .mapNotNull { TranslationQuality.usable(it, text) }
+            .filterNot { TranslationQuality.isEcho(text, it) }
+            .minByOrNull { TranslationQuality.hanCount(it) }
+        if (bestEffort != null && TranslationQuality.hanCount(bestEffort) < TranslationQuality.hanCount(text)) {
+            return Result.success(bestEffort)
+        }
 
-        Log.e("TomatoMTLProvider", "Translation request failed: ${error.message}", error)
+        val secondaryError = secondaryResult.exceptionOrNull()
+        val answeredBadly = primaryText != null || secondaryText != null ||
+            (primaryError as? TranslationException)?.isSoftFailure == true ||
+            (secondaryError as? TranslationException)?.isSoftFailure == true
+        val error = when {
+            secondaryError is TranslationException && secondaryError.isRateLimited -> secondaryError
+            answeredBadly -> {
+                // Google answered, but with nothing usable: it does this when overloaded. For whole
+                // chunks everyone slows down a little (single lines and words don't pause the queue)
+                // and the chunk is retried later.
+                if (text.length >= SHARED_COOLDOWN_MIN_CHARS) setRateLimitCooldown(SOFT_FAILURE_COOLDOWN_MS)
+                TranslationException(
+                    "Google returned an empty or untranslated answer",
+                    isSoftFailure = true
+                )
+            }
+            else -> secondaryError ?: primaryError
+                ?: TranslationException("Translation returned empty text from engine.", isSoftFailure = true)
+        }
+
+        Log.w(TAG, "Translation request failed: ${error.message}")
         return Result.failure(error)
     }
 
     /**
      * TomatoMTL's Google Translation Engine using direct POST request with form body.
      */
-    private fun executeTomatoMtlGoogleEngine(text: String, sl: String, tl: String): String {
+    internal fun executeTomatoMtlGoogleEngine(text: String, sl: String, tl: String): String {
         val url = "https://translate.googleapis.com/translate_a/t?client=dict-chrome-ex&sl=$sl&tl=$tl"
 
         val formBody = FormBody.Builder()
@@ -155,13 +228,13 @@ class TomatoMTLProvider(
             .post(formBody)
             .build()
 
-        return executeRequestAndParse(request, "TomatoMTL Engine")
+        return executeRequestAndParse(request, "TomatoMTL Engine", ::parseTEndpoint)
     }
 
     /**
      * Fallback translation engine using single format if primary endpoint encounters issues.
      */
-    private fun executeFallbackEngine(text: String, sl: String, tl: String): String {
+    internal fun executeFallbackEngine(text: String, sl: String, tl: String): String {
         val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=$sl&tl=$tl&dt=t"
 
         val formBody = FormBody.Builder()
@@ -176,10 +249,10 @@ class TomatoMTLProvider(
             .post(formBody)
             .build()
 
-        return executeRequestAndParse(request, "Fallback Engine")
+        return executeRequestAndParse(request, "Fallback Engine", ::parseSingleEndpoint)
     }
 
-    private fun executeRequestAndParse(request: Request, engineName: String): String {
+    private fun executeRequestAndParse(request: Request, engineName: String, parseArray: (String) -> String): String {
         try {
             client.newCall(request).execute().use { response ->
                 val code = response.code
@@ -230,10 +303,10 @@ class TomatoMTLProvider(
 
                 val responseBody = response.body?.string()
                 if (responseBody.isNullOrBlank()) {
-                    throw TranslationException("Empty HTTP response body from $engineName", statusCode = code)
+                    throw TranslationException("Empty HTTP response body from $engineName", statusCode = code, isSoftFailure = true)
                 }
 
-                return parseResponse(responseBody)
+                return parseResponse(responseBody, engineName, parseArray)
             }
         } catch (e: TranslationException) {
             throw e
@@ -248,58 +321,46 @@ class TomatoMTLProvider(
         }
     }
 
-    private fun parseResponse(responseBody: String): String {
+    /**
+     * The translated text of an answer. Anything that isn't a well-formed answer is a failure: the
+     * raw body is never returned as if it were a translation.
+     */
+    private fun parseResponse(responseBody: String, engineName: String, parseArray: (String) -> String): String {
         val trimmed = responseBody.trim()
 
-        if (trimmed.isEmpty() || 
-            trimmed.startsWith("<html", ignoreCase = true) || 
-            trimmed.startsWith("<!doctype", ignoreCase = true) ||
-            trimmed.startsWith("<head", ignoreCase = true)) {
-            throw TranslationException("Empty or invalid HTML error response from translation engine")
+        if (trimmed.startsWith("<")) {
+            // A web page instead of JSON (Google's "unusual traffic" check, or a network login page).
+            // Everyone pauses, and the chunk tries again after a long wait. It counts as a failed try,
+            // so a page that never goes away fails the chunk instead of retrying forever.
+            setRateLimitCooldown(BLOCKED_PAGE_COOLDOWN_MS)
+            throw TranslationException(
+                message = "$engineName answered with a web page instead of a translation",
+                retryAfterMs = BLOCKED_PAGE_COOLDOWN_MS
+            )
         }
 
-        if (trimmed.startsWith("[")) {
-            val jsonArray = JSONArray(trimmed)
-            val sb = StringBuilder()
-            for (i in 0 until jsonArray.length()) {
-                val item = jsonArray.opt(i)
-                if (item is String) {
-                    sb.append(item)
-                } else if (item is JSONArray) {
-                    for (j in 0 until item.length()) {
-                        val sub = item.opt(j)
-                        if (sub is JSONArray && sub.length() > 0) {
-                            sb.append(sub.optString(0))
-                        } else if (sub is String) {
-                            sb.append(sub)
-                        }
+        val text = try {
+            when {
+                trimmed.startsWith("[") -> parseArray(trimmed)
+                trimmed.startsWith("{") -> {
+                    val json = JSONObject(trimmed)
+                    when {
+                        json.has("translatedText") -> json.optString("translatedText")
+                        json.has("translation") -> json.optString("translation")
+                        else -> ""
                     }
                 }
+                else -> ""
             }
-            val res = sb.toString().trim()
-            if (res.isNotBlank()) return res
-        } else if (trimmed.startsWith("{")) {
-            val json = JSONObject(trimmed)
-            val extracted = when {
-                json.has("translatedText") -> json.getString("translatedText")
-                json.has("translation") -> json.getString("translation")
-                json.has("result") -> json.getString("result")
-                json.has("data") -> {
-                    val data = json.get("data")
-                    if (data is String) data
-                    else if (data is JSONObject && data.has("translatedText")) data.getString("translatedText")
-                    else null
-                }
-                else -> null
-            }
-            if (!extracted.isNullOrBlank()) return extracted.trim()
+        } catch (e: org.json.JSONException) {
+            throw TranslationException("$engineName sent an unreadable answer", isSoftFailure = true, cause = e)
         }
 
-        if (trimmed.isNotBlank() && !trimmed.startsWith("<")) {
-            return trimmed
+        val result = text.trim()
+        if (result.isEmpty()) {
+            throw TranslationException("$engineName returned an empty translation", isSoftFailure = true)
         }
-
-        throw TranslationException("Translation returned empty or invalid response")
+        return result
     }
 }
 

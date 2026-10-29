@@ -78,7 +78,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         database.chunkDao().observeAllTitleChunks()
     ) { books, jobs, titleChunks ->
         val jobMap = jobs.associateBy { it.bookId }
-        val titleMap = titleChunks.associate { it.bookId to it.translatedText?.takeIf { t -> t.isNotBlank() } }
+        val titleMap = titleChunks.associate { it.bookId to com.example.translation.TranslationQuality.usableTitle(it.translatedText) }
         books.map { BookWithJob(it, jobMap[it.id], titleMap[it.id]) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -307,7 +307,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 val exportFile = cached ?: run {
                     val titleChunk = database.chunkDao().getTitleChunk(job.id)
-                    val translatedTitle = titleChunk?.translatedText?.takeIf { it.isNotBlank() } ?: book.title
+                    val translatedTitle = com.example.translation.TranslationQuality.usableTitle(titleChunk?.translatedText, titleChunk?.sourceText)
+                        ?: book.title
                     val exportName = "${com.example.epub.EpubRebuilder.sanitizeFileName(translatedTitle)}.epub"
                     val file = File(bookDir, exportName)
 

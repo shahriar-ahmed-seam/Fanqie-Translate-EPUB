@@ -65,7 +65,7 @@ class WebViewBrowserEngine(
         contextWrapper.baseContext = activityContext
         val view = ensureWebView(loadStartPage = true)
         container = target
-        if (view.parent === target) return
+        if (view == null || view.parent === target) return
         (view.parent as? ViewGroup)?.removeView(view)
         target.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
@@ -82,10 +82,20 @@ class WebViewBrowserEngine(
     }
 
     override fun loadUrl(url: String) = onMain {
-        ensureWebView(loadStartPage = false).loadUrl(toLoadableUrl(url))
+        val view = ensureWebView(loadStartPage = false) ?: return@onMain
+        showInContainer(view)
+        view.loadUrl(toLoadableUrl(url))
     }
 
-    override fun reload() = onMain { webView?.reload() }
+    override fun reload() = onMain {
+        val view = webView
+        if (view != null) {
+            view.reload()
+        } else {
+            // The browser couldn't start earlier: try again (Reload on the error card).
+            ensureWebView(loadStartPage = true)?.let { showInContainer(it) }
+        }
+    }
 
     override fun stopLoading() = onMain {
         webView?.stopLoading()
@@ -126,17 +136,41 @@ class WebViewBrowserEngine(
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
     }
 
+    /**
+     * Returns the WebView, creating it on first use. Returns null (and shows the reason on the
+     * browser screen) if the system WebView can't start, e.g. while it is being updated, missing,
+     * or its data directory is locked. That used to crash the whole app.
+     */
     @MainThread
-    private fun ensureWebView(loadStartPage: Boolean): WebView {
+    private fun ensureWebView(loadStartPage: Boolean): WebView? {
         webView?.let { return it }
-        val view = createWebView()
+        val view = try {
+            createWebView()
+        } catch (t: Throwable) {
+            if (t is VirtualMachineError) throw t
+            Log.e(TAG, "WebView couldn't be created", t)
+            _state.update { it.copy(isLoading = false, mainFrameError = webViewStartError(t)) }
+            return null
+        }
         webView = view
+        if (_state.value.mainFrameError?.startsWith(BROWSER_START_ERROR) == true) {
+            _state.update { it.copy(mainFrameError = null) }
+        }
         keepLaidOut(view)
         if (loadStartPage) {
             val initial = startUrl().trim()
             if (initial.isNotEmpty()) view.loadUrl(toLoadableUrl(initial))
         }
         return view
+    }
+
+    /** Puts a (re)created WebView into the container the UI currently shows, if any. */
+    @MainThread
+    private fun showInContainer(view: WebView) {
+        val target = container ?: return
+        if (view.parent === target) return
+        (view.parent as? ViewGroup)?.removeView(view)
+        target.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
 
     private fun keepLaidOut(view: WebView) {
@@ -298,7 +332,7 @@ class WebViewBrowserEngine(
             Log.w(TAG, "Destroying crashed WebView failed", t)
         }
         if (webView === dead) webView = null
-        val fresh = ensureWebView(loadStartPage = false)
+        val fresh = ensureWebView(loadStartPage = false) ?: return
         val target = container ?: (parent as? FrameLayout)
         if (target != null && fresh.parent == null) {
             target.addView(fresh, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -310,6 +344,23 @@ class WebViewBrowserEngine(
     companion object {
         private const val TAG = "ScraperBrowser"
         private const val EVAL_TIMEOUT_MS = 15_000L
+        private const val BROWSER_START_ERROR = "the browser couldn't start"
+
+        /** Message shown on the browser screen when the system WebView can't be created. */
+        internal fun webViewStartError(error: Throwable): String {
+            val text = generateSequence(error) { it.cause }.mapNotNull { it.message }.joinToString(" ")
+            val reason = when {
+                text.contains("more than one process", ignoreCase = true) ||
+                    text.contains("data directory", ignoreCase = true) ->
+                    "another part of the app is using it. Tap Reload"
+                text.contains("webview package", ignoreCase = true) ||
+                    text.contains("MissingWebViewPackage", ignoreCase = true) ||
+                    error.javaClass.name.contains("MissingWebViewPackage") ->
+                    "Android System WebView is missing or being updated. Update or enable it, then tap Reload"
+                else -> "Android System WebView failed to load. Tap Reload"
+            }
+            return "$BROWSER_START_ERROR ($reason)"
+        }
         private val ALLOWED_SCHEMES = setOf("http", "https", "about", "data", "blob", "javascript")
 
         /** Turns address-bar input into a URL: adds https:// to hosts, searches anything else. */

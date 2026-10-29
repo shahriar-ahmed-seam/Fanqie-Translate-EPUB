@@ -32,4 +32,7 @@ object EngineProtocol {
     const val INLINE_RESULT_LIMIT = 200_000
 
     const val PROCESS_SUFFIX = ":tomato"
+
+    /** The engine process's WebView data directory is "app_webview_" + this (see TomatoEngineProcess). */
+    const val WEBVIEW_DATA_SUFFIX = "tomato"
 }

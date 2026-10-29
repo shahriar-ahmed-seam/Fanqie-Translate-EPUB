@@ -1,14 +1,13 @@
-What's new
+What's fixed
+Scraper and Tomato
+- The app no longer crashes when you open the Scraper browser after using the Tomato tab.
+- Looking up a novel by ID is reliable: it retries while the downloader engine is starting, asks Fanqie's website when the engine can't answer, and shows which ID it looked up. IDs typed with other digits (Bengali, full-width) or copied with hidden characters work, and a number that isn't a valid ID gets a clear message instead of unrelated search results.
 
-Tomato tab: download novels from Fanqie
-- New 🍅 tab. Search a Fanqie novel by its ID, a book link, or its title, and see the cover and details.
-- Download the novel (in the original Chinese) with one tap, or save it to a "download later" list.
-- Downloads keep running with the screen off. A downloaded book can be translated (it goes to your library like any other translation), added to the bookshelf to read in Chinese, re-downloaded, exported as EPUB, or deleted.
-- The downloader engine is fetched once from the open-source Fanqie Novel Downloader project and runs in its own process, so a problem there never affects the rest of the app. If Fanqie changes and downloads stop working, use "Check for update" in the Tomato tab settings.
+Translation
+- Chapters no longer come out as [""]: empty answers from Google are retried instead of being saved.
+- Paragraphs, words and chapter titles that Google left in Chinese are translated again until they are English.
+- Chunks that fail are retried automatically before a book is marked as failed.
+- Exported EPUBs: chapters whose file names have Chinese or special characters are now translated, and the table of contents is fully in English.
+- Books you translated with earlier versions are fixed automatically: chapters showing [""] are translated again the first time the app opens with internet, and Chinese left in other chapters is translated in the background while no other book is translating. Your books stay readable meanwhile.
 
-Also included (from 1.1)
-- Stable audiobook (TTS) playback with the screen off and the phone locked; resumes where it stopped.
-- Scraper tab for collecting chapters from novel websites.
-- Working in-app updates.
-
-Installing: this version installs over 1.0.11 and newer and keeps your library. Versions 1.0.10 or older must be uninstalled first (different signing key). If you are on 1.0.22 or older, install this one manually once; updates after that appear in the app.
+Installing: this version installs over 1.0.11 and newer and keeps your library. Versions 1.0.10 or older must be uninstalled first (different signing key).

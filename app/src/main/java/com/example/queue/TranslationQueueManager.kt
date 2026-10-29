@@ -11,6 +11,8 @@ import com.example.epub.*
 import com.example.translation.TomatoMTLProvider
 import com.example.translation.TranslationException
 import com.example.translation.TranslationProvider
+import com.example.translation.TranslationQuality
+import com.example.translation.TranslationQualityException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
@@ -36,13 +39,29 @@ data class ImportProgress(
 class TranslationQueueManager(
     private val context: Context,
     private val database: AppDatabase,
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    /** Builds the translation service for (timeout seconds, workers); replaced in tests. */
+    private val providerFactory: (Int, Int) -> TranslationProvider = { timeout, workers ->
+        TomatoMTLProvider(timeoutSeconds = timeout.toLong(), maxConcurrentRequests = workers)
+    },
+    /** Waits between a chunk's attempts; replaced in tests. */
+    private val retrySleep: suspend (Long) -> Unit = { delay(it) },
+    /** True when the phone has a working internet connection (the start-up repair needs one). */
+    private val isOnline: () -> Boolean = { NetworkState.isOnline(context) },
+    /** Where the one-time maintenance flags are kept; tests use their own. */
+    private val maintenancePrefsName: String = MAINTENANCE_PREFS
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile
-    private var provider: TranslationProvider = TomatoMTLProvider()
+    private var provider: TranslationProvider = providerFactory(30, 64)
     /** (timeout, workers) the current provider was built with. */
     private var providerConfig: Pair<Int, Int>? = null
+    /** Checks every translation before it is saved and re-translates paragraphs left in Chinese. */
+    private val chunkTranslator = ChunkTranslator { provider }
+
+    /** Automatic retry rounds used per job for chunks that failed (in memory; a restart starts over). */
+    private val autoRetryRounds = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val autoRetryLock = kotlinx.coroutines.sync.Mutex()
 
     private val activeWorkersCounter = AtomicInteger(0)
     private val _activeWorkers = MutableStateFlow(0)
@@ -92,6 +111,10 @@ class TranslationQueueManager(
                 database.chunkDao().resetTranslatingChunksToPending()
                 database.jobDao().resetPausingJobsToPaused()
                 database.jobDao().resetRunningJobsToQueued()
+                // A finished (or failed) book with chunks still waiting would never be picked up
+                // (for example if the app stopped in the middle of "Retry failed"): queue it again.
+                database.jobDao().requeueFinishedJobsWithWaitingChunks()
+                repairStoredTranslationsOnce()
                 val activeJobs = database.jobDao().getActiveJobs()
                 for (job in activeJobs) {
                     updateJobProgress(job.id)
@@ -101,6 +124,7 @@ class TranslationQueueManager(
             } catch (e: Exception) {
                 Log.e("QueueManager", "Error during startup queue recovery", e)
             }
+            improveStoredTranslationsInBackground()
         }
 
         // Apply worker count or timeout adjustments immediately when settings change
@@ -111,6 +135,71 @@ class TranslationQueueManager(
                 }
             }
         }
+    }
+
+    private val maintenancePrefs by lazy { context.getSharedPreferences(maintenancePrefsName, Context.MODE_PRIVATE) }
+
+    /**
+     * Once after updating: chunks that earlier versions stored as `[""]` (or empty) are translated
+     * again; their books go back into the queue (behind the books being translated now). Language
+     * codes glued to translations are removed in place. Waits for a working connection, so books
+     * aren't marked failed because the phone was offline at the first start.
+     */
+    private suspend fun repairStoredTranslationsOnce() {
+        if (maintenancePrefs.getBoolean(KEY_QUALITY_REPAIR_DONE, false)) return
+        if (!isOnline()) {
+            Log.i("QueueManager", "Stored translation check postponed: no internet connection")
+            return
+        }
+        try {
+            val summary = StoredTranslationRepair(database).run()
+            for (jobId in summary.requeuedJobs) updateJobProgress(jobId)
+            // Exports made before this version are built again on the next export (export fixes).
+            database.jobDao().clearAllExportCaches()
+            maintenancePrefs.edit().putBoolean(KEY_QUALITY_REPAIR_DONE, true).apply()
+            val message = "Translation check: ${summary.scanned} chunks checked, ${summary.requeued} sent back for " +
+                "translation (${summary.requeuedJobs.size} books), ${summary.cleaned} cleaned"
+            Log.i("QueueManager", message)
+            com.example.diagnostics.AppDiagnostics.log("translation", message)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Tried again at the next start.
+            Log.e("QueueManager", "Stored translation check failed", e)
+        }
+    }
+
+    /**
+     * Until it has finished once: Chinese left in translations made by earlier versions (paragraphs
+     * Google sent back untranslated, words inside English sentences, titles) is translated again and
+     * fixed in place. Books stay completed and readable meanwhile. Runs only while no book is being
+     * translated and the phone is online, a few chunks at a time; continues at the next start if
+     * the app stops or Google starts limiting requests.
+     */
+    private suspend fun improveStoredTranslationsInBackground() {
+        if (maintenancePrefs.getBoolean(KEY_QUALITY_IMPROVE_DONE, false)) return
+        try {
+            val improver = StoredTranslationImprover(database, chunkTranslator) {
+                // Books being translated come first.
+                runnableJobsAvailable.first { !it }
+                while (!isOnline()) delay(IMPROVE_OFFLINE_RECHECK_MS)
+            }
+            val summary = improver.run()
+            if (summary.finished) maintenancePrefs.edit().putBoolean(KEY_QUALITY_IMPROVE_DONE, true).apply()
+            val message = "Translation clean-up: ${summary.checked} chunks with Chinese left, ${summary.improved} improved" +
+                if (summary.finished) "" else " (stopped early; continues at the next start)"
+            Log.i("QueueManager", message)
+            com.example.diagnostics.AppDiagnostics.log("translation", message)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("QueueManager", "Translation clean-up failed", e)
+        }
+    }
+
+    /** Stops all work (tests only; the app's queue lives as long as the process). */
+    internal fun close() {
+        scope.cancel()
     }
 
     private fun updateActiveCounts() {
@@ -147,10 +236,7 @@ class TranslationQueueManager(
         // Rebuild the provider when the timeout or the worker count changes (the timeout used to be ignored).
         val config = settings.timeoutSeconds to targetWorkerCount
         if (providerConfig != config) {
-            provider = TomatoMTLProvider(
-                timeoutSeconds = settings.timeoutSeconds.toLong(),
-                maxConcurrentRequests = targetWorkerCount
-            )
+            provider = providerFactory(settings.timeoutSeconds, targetWorkerCount)
             providerConfig = config
         }
 
@@ -259,10 +345,11 @@ class TranslationQueueManager(
                     }
 
                     // Execute translation task with the retry budget this chunk has left
-                    val outcome = executeChunkWithRetry(
+                    val run = executeChunkWithRetry(
                         chunk = chunk,
                         remainingBudget = settings.maxRetries - chunk.retryCount
                     )
+                    val outcome = run.outcome
                     val success = outcome.isSuccess
                     val translatedText = outcome.translatedText
                     val error = outcome.error
@@ -289,20 +376,37 @@ class TranslationQueueManager(
                             revertChunkToPending(chunk)
                         } else {
                             val newRetryCount = chunk.retryCount + outcome.failedAttempts.coerceAtLeast(1)
-                            val status = if (newRetryCount >= settings.maxRetries) "FAILED" else "PENDING"
-                            // Update chunk safely inside a transaction: only update if still TRANSLATING
-                            // to guarantee completed chunks are NEVER overwritten!
-                            database.withTransaction {
-                                val current = database.chunkDao().getChunkById(chunk.id)
-                                if (current != null && current.status == "TRANSLATING") {
-                                    database.chunkDao().updateChunk(
-                                        current.copy(
-                                            status = status,
-                                            retryCount = newRetryCount,
-                                            errorMessage = error?.message ?: "Translation failed",
-                                            updatedAt = System.currentTimeMillis()
+                            val outOfRetries = newRetryCount >= settings.maxRetries
+                            val lastResortText = if (outOfRetries) lastResortTranslation(chunk, run) else null
+                            if (lastResortText != null) {
+                                database.chunkDao().updateChunkResult(
+                                    id = chunk.id,
+                                    jobId = chunk.jobId,
+                                    bookId = chunk.bookId,
+                                    status = "COMPLETED",
+                                    translatedText = lastResortText,
+                                    errorMessage = KEPT_UNTRANSLATED_NOTE
+                                )
+                                isChunkCompleted = true
+                                val message = "Chunk ${chunk.id} (${chunk.chunkType}) kept with some Chinese left after $newRetryCount tries"
+                                Log.w("QueueManager", message)
+                                com.example.diagnostics.AppDiagnostics.log("translation", message)
+                            } else {
+                                val status = if (outOfRetries) "FAILED" else "PENDING"
+                                // Update chunk safely inside a transaction: only update if still TRANSLATING
+                                // to guarantee completed chunks are NEVER overwritten!
+                                database.withTransaction {
+                                    val current = database.chunkDao().getChunkById(chunk.id)
+                                    if (current != null && current.status == "TRANSLATING") {
+                                        database.chunkDao().updateChunk(
+                                            current.copy(
+                                                status = status,
+                                                retryCount = newRetryCount,
+                                                errorMessage = error?.message ?: "Translation failed",
+                                                updatedAt = System.currentTimeMillis()
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
                         }
@@ -405,17 +509,54 @@ class TranslationQueueManager(
         return null
     }
 
+    /** A chunk's attempts in one claim, plus its best partial translation (paragraphs still Chinese). */
+    private class ChunkRun(val outcome: ChunkAttemptOutcome, val bestPartial: TranslationQualityException?)
+
+    /**
+     * What to keep for a chunk that ran out of retries while Google kept answering with some Chinese
+     * left (never for network failures, which are retried later):
+     * - a body chunk with only a few paragraphs still Chinese keeps its best translation (one Chinese
+     *   line beats a missing piece of the chapter);
+     * - a title keeps its best translation, or its source text; the reader and the export then show
+     *   "Chapter N". A title must never leave the whole book failed.
+     */
+    private fun lastResortTranslation(chunk: TranslationChunkEntity, run: ChunkRun): String? {
+        val partial = run.bestPartial
+        if (partial != null && ChunkTranslator.isAcceptableLastResort(partial)) return partial.bestText
+        // Google keeps answering, but never with a usable translation (not a network problem).
+        val answeredBadly = (run.outcome.error as? TranslationException)?.isSoftFailure == true
+        if (!answeredBadly) return null
+        // A title never fails a book, and after the automatic rounds neither does a body chunk: the
+        // best text Google gave, or the original, is kept (as earlier versions kept any answer).
+        val finalRound = (autoRetryRounds[chunk.jobId] ?: 0) >= MAX_AUTO_RETRY_ROUNDS
+        if (!ChunkTranslator.isTitle(chunk.chunkType) && !finalRound) return null
+        return partial?.bestText
+            ?.takeIf { it.isNotBlank() && !TranslationQuality.isJsonJunk(it) && TranslationQuality.hanCount(it) < TranslationQuality.hanCount(chunk.sourceText) }
+            ?: chunk.sourceText
+    }
+
     private suspend fun executeChunkWithRetry(
         chunk: TranslationChunkEntity,
         remainingBudget: Int
-    ): ChunkAttemptOutcome {
-        val outcome = translateWithRetry(remainingBudget = remainingBudget) {
-            provider.translate(chunk.sourceText, "zh", "en")
+    ): ChunkRun {
+        var bestPartial: TranslationQualityException? = null
+        var attempts = 0
+        val outcome = translateWithRetry(remainingBudget = remainingBudget, sleep = retrySleep) {
+            // From the third try on (counting earlier claims), a chunk Google keeps answering empty
+            // or in Chinese is translated paragraph by paragraph.
+            val thorough = chunk.retryCount + attempts++ >= THOROUGH_FROM_ATTEMPT
+            chunkTranslator.translate(chunk.chunkType, chunk.sourceText, thorough).onFailure { e ->
+                if (e is TranslationQualityException && e.bestText != null &&
+                    (bestPartial == null || e.badParagraphs < bestPartial!!.badParagraphs)
+                ) {
+                    bestPartial = e
+                }
+            }
         }
         if (!outcome.isSuccess) {
             Log.w("QueueManager", "Chunk ${chunk.id} not translated (failed attempts=${outcome.failedAttempts}, deferred=${outcome.deferredByRateLimit}): ${outcome.error?.message}")
         }
-        return outcome
+        return ChunkRun(outcome, bestPartial)
     }
 
     /**
@@ -692,7 +833,9 @@ class TranslationQueueManager(
         }
 
         // If chunks have failed and no pending or translating chunks remain, mark FAILED
+        // (after the automatic retry rounds)
         if (failed > 0 && (completed + failed == total) && translating == 0) {
+            if (autoRetryFailedChunks(jobId)) return
             val errorMsg = "Translation incomplete: $failed chunks failed"
             database.jobDao().updateJob(
                 currentJob.copy(
@@ -715,6 +858,26 @@ class TranslationQueueManager(
 
         // Otherwise job is actively RUNNING
         database.jobDao().updateJobProgress(jobId, completed, failed, progress, "RUNNING")
+    }
+
+    /**
+     * All of a job's remaining chunks failed. Google's bad spells usually pass, so the failed chunks
+     * get [MAX_AUTO_RETRY_ROUNDS] more rounds (after a pause) before the book is marked failed.
+     * Returns true when they were queued again (or already were).
+     */
+    private suspend fun autoRetryFailedChunks(jobId: String): Boolean = autoRetryLock.withLock {
+        if (database.chunkDao().getFailedChunkCount(jobId) == 0) return@withLock true
+        val job = database.jobDao().getJobById(jobId) ?: return@withLock false
+        if (job.status !in RUNNABLE_JOB_STATUSES) return@withLock false
+        val round = (autoRetryRounds[jobId] ?: 0) + 1
+        if (round > MAX_AUTO_RETRY_ROUNDS) return@withLock false
+        autoRetryRounds[jobId] = round
+        TomatoMTLProvider.setRateLimitCooldown(AUTO_RETRY_COOLDOWN_MS * round)
+        database.chunkDao().retryFailedChunks(jobId)
+        val message = "Job $jobId: some chunks failed; retrying them automatically (round $round of $MAX_AUTO_RETRY_ROUNDS)"
+        Log.i("QueueManager", message)
+        com.example.diagnostics.AppDiagnostics.log("translation", message)
+        true
     }
 
     private data class ConsistencyResult(val isValid: Boolean, val errorMessage: String? = null)
@@ -776,6 +939,7 @@ class TranslationQueueManager(
         // If any chunk is still translating, pending, or incomplete, or total chunks mismatch, the book must NOT be marked COMPLETED
         if (translating > 0 || incomplete > 0 || completed < total || total < job.totalChunks) {
             if (failed > 0 && (completed + failed == total) && translating == 0) {
+                if (autoRetryFailedChunks(jobId)) return
                 val errorMsg = "Translation incomplete: $failed chunks failed"
                 database.jobDao().updateJob(
                     job.copy(
@@ -798,6 +962,19 @@ class TranslationQueueManager(
             }
 
             try {
+                // A book is never completed with an empty or junk ("[""]") translation stored: such
+                // chunks go back to the queue (new translations are checked before they are saved,
+                // so this only catches leftovers).
+                val junk = database.chunkDao().getSuspiciousCompletedChunks(jobId).filter {
+                    TranslationQuality.needsTranslation(it.sourceText) &&
+                        TranslationQuality.usable(it.translatedText, it.sourceText) == null
+                }
+                if (junk.isNotEmpty()) {
+                    junk.forEach { database.chunkDao().requeueCompletedChunk(it.id, StoredTranslationRepair.REASON) }
+                    Log.w("QueueManager", "Job $jobId had ${junk.size} unusable translations; translating them again")
+                    return
+                }
+
                 // Strict final consistency check
                 val consistency = verifyJobTranslationConsistency(jobId, job.bookId, total)
                 if (!consistency.isValid) {
@@ -812,17 +989,30 @@ class TranslationQueueManager(
                     return
                 }
 
-                // Translation is 100% verified and COMPLETED!
-                database.jobDao().updateJob(
-                    job.copy(
-                        status = "COMPLETED",
-                        progress = 1.0f,
-                        completedChunks = total,
-                        failedChunks = 0,
-                        errorMessage = null,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
+                // Translation is 100% verified and COMPLETED! Checked again in the same transaction:
+                // a chunk sent back meanwhile (by the start-up check) must not end in a completed book.
+                val completedNow = database.withTransaction {
+                    val live = database.jobDao().getJobById(jobId)
+                    if (live == null || live.status == "COMPLETED" || live.status == "CANCELLED" || live.status == "PAUSED" ||
+                        database.chunkDao().getIncompleteChunkCount(jobId) > 0
+                    ) {
+                        false
+                    } else {
+                        database.jobDao().updateJob(
+                            live.copy(
+                                status = "COMPLETED",
+                                progress = 1.0f,
+                                completedChunks = total,
+                                failedChunks = 0,
+                                errorMessage = null,
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+                        true
+                    }
+                }
+                if (!completedNow) return
+                autoRetryRounds.remove(jobId)
                 Log.i("QueueManager", "Job $jobId translation COMPLETED successfully ($total chunks verified).")
             } finally {
                 finalizingJobIds.remove(jobId)
@@ -877,6 +1067,8 @@ class TranslationQueueManager(
      */
     fun retryFailed(jobId: String) {
         scope.launch {
+            // A manual retry gets the automatic rounds again too.
+            autoRetryRounds.remove(jobId)
             database.chunkDao().retryFailedChunks(jobId)
             database.jobDao().updateJobStatus(jobId, "QUEUED")
             updateJobProgress(jobId)
@@ -923,6 +1115,18 @@ class TranslationQueueManager(
         val RUNNABLE_JOB_STATUSES = setOf("QUEUED", "RUNNING", "TRANSLATING")
         const val COORDINATOR_TICK_MS = 15_000L
         const val IDLE_RECHECK_DELAY_MS = 250L
+        const val MAINTENANCE_PREFS = "translation_maintenance"
+        const val KEY_QUALITY_REPAIR_DONE = "quality_repair_v1_done"
+        const val KEY_QUALITY_IMPROVE_DONE = "quality_improve_v1_done"
+        const val IMPROVE_OFFLINE_RECHECK_MS = 60_000L
+        /** Tries (counted over all claims) from which a chunk is translated paragraph by paragraph. */
+        const val THOROUGH_FROM_ATTEMPT = 2
+        /** Stored on chunks kept with Chinese left (diagnostics only; nothing shows chunk messages). */
+        const val KEPT_UNTRANSLATED_NOTE = "Kept with some Chinese: Google didn't translate all of it"
+        /** Extra full rounds for failed chunks before a book is marked failed. */
+        const val MAX_AUTO_RETRY_ROUNDS = 2
+        /** Pause before each automatic round, times the round number (lets Google recover). */
+        const val AUTO_RETRY_COOLDOWN_MS = 10_000L
     }
 }
 

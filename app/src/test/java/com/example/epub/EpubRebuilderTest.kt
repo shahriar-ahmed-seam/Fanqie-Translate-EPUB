@@ -189,4 +189,63 @@ class EpubRebuilderTest {
         assertFalse(doc.text().contains("行"))
         assertNotNull(doc.selectFirst("img[src=a.png]"))
     }
+
+    @Test
+    fun junkStoredByOlderVersionsIsNeverExported() {
+        val source = importedParagraphs(novelChapter)
+        val chunks = listOf(
+            chunk(0, source.take(4), listOf("Chapter 1", "Paragraph A.", "Letter B.", "Letter C.")),
+            chunk(1, source.drop(4), listOf("[\"\"]"))
+        )
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(novelChapter, "Chapter 1", chunks))
+        assertFalse(doc.text().contains("[\"\"]"))
+        assertEquals("the untranslated part keeps its source text", listOf("Paragraph A.", "Letter B.", "Letter C.", "丁段。", "戊段。"), doc.select("p").map { it.text() })
+    }
+
+    @Test
+    fun anUntranslatedTitleNoLongerOverwritesTheTranslatedHeading() {
+        val source = importedParagraphs(novelChapter)
+        val english = listOf("Chapter 1: Into the World", "Paragraph A.", "Letter B.", "Letter C.", "Subheading", "Paragraph D.", "Paragraph E.")
+        // No usable chapter-title translation: an empty title is passed.
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(novelChapter, "", listOf(chunk(0, source, english))))
+        assertEquals("Chapter 1: Into the World", doc.select("h1").text())
+        assertEquals("Chapter 1: Into the World", doc.title())
+    }
+
+    @Test
+    fun aHeadingFollowedByLooseLinesIsTranslatedLineByLine() {
+        val longLine = "这一行是很长的正文内容，用来模拟没有段落标签的章节。".repeat(4)
+        val xhtml = "<html><head><title>第三章</title></head><body><h2>第三章 夜</h2><div>$longLine<br/>第二行文字也在这里。<br/>第三行。</div></body></html>"
+        val source = importedParagraphs(xhtml)
+        assertEquals("the story text outside block tags is imported", listOf("第三章 夜", longLine, "第二行文字也在这里。", "第三行。"), source)
+
+        val english = listOf("Chapter 3 Night", "This is a long line of body text.", "The second line is here too.", "The third line.")
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(xhtml, "Chapter 3 Night", listOf(chunk(0, source, english))))
+        // Each line is replaced where it is: the heading stays a heading, the line breaks stay.
+        assertEquals(english, EpubParser.textLines(doc.body()))
+        assertEquals("Chapter 3 Night", doc.select("h2").text())
+        assertEquals(2, doc.select("div br").size)
+        assertEquals(0, com.example.translation.TranslationQuality.hanCount(doc.body().text()))
+        assertEquals("Chapter 3 Night", doc.title())
+    }
+
+    @Test
+    fun linesStayInPlaceAroundPictures() {
+        val longLine = "第一行很长的正文内容在这里，用来模拟没有段落标签的章节内容。".repeat(4)
+        val xhtml = "<html><body><h1>第五章</h1><div>$longLine<br/><img src=\"x.png\"/><br/>第二行在图片后面。</div></body></html>"
+        val source = importedParagraphs(xhtml)
+        assertEquals(listOf("第五章", longLine, "第二行在图片后面。"), source)
+        val english = listOf("Chapter 5", "The first long line.", "The second line, after the picture.")
+        val doc = Jsoup.parse(EpubRebuilder.rebuildChapterXhtml(xhtml, "Chapter 5", listOf(chunk(0, source, english))))
+        val div = doc.selectFirst("div")!!
+        val html = div.html()
+        assertTrue("the picture stays between the lines", html.indexOf("The first long line.") < html.indexOf("x.png") && html.indexOf("x.png") < html.indexOf("after the picture"))
+        assertEquals(0, com.example.translation.TranslationQuality.hanCount(doc.body().text()))
+    }
+
+    @Test
+    fun aFewLooseCharactersDoNotChangeHowAChapterIsRead() {
+        val xhtml = "<html><body><h1>第一章</h1><p>甲段。</p><p>乙段。</p>完<br/></body></html>"
+        assertEquals(listOf("第一章", "甲段。", "乙段。"), importedParagraphs(xhtml))
+    }
 }
