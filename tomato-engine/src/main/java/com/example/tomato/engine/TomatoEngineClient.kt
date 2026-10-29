@@ -14,6 +14,7 @@ import android.os.RemoteException
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -57,14 +58,25 @@ class TomatoEngineClient(
 
     /** Calls `dispatch(action, payload)` in the engine and returns the JSON reply. */
     suspend fun call(action: String, payloadJson: String = "{}", timeoutMs: Long = DEFAULT_TIMEOUT_MS): String {
-        val messenger = connect()
-        val data = Bundle().apply {
-            putString(EngineProtocol.KEY_ACTION, action)
-            putString(EngineProtocol.KEY_PAYLOAD, payloadJson)
-            putLong(EngineProtocol.KEY_TIMEOUT_MS, timeoutMs)
+        var restarts = 0
+        var reply: Bundle
+        while (true) {
+            val messenger = connect()
+            val data = Bundle().apply {
+                putString(EngineProtocol.KEY_ACTION, action)
+                putString(EngineProtocol.KEY_PAYLOAD, payloadJson)
+                putLong(EngineProtocol.KEY_TIMEOUT_MS, timeoutMs)
+            }
+            // The first call also starts the engine, which can take a while on slow phones.
+            reply = send(messenger, EngineProtocol.MSG_CALL, data, timeoutMs + ENGINE_START_ALLOWANCE_MS)
+            // The process still had the previous engine version loaded and is ending: call the new one.
+            if (reply.getBoolean(EngineProtocol.KEY_RESTART, false) && restarts++ < MAX_RESTARTS) {
+                Log.i(TAG, "Engine process is restarting for another engine version")
+                awaitEnd(messenger)
+                continue
+            }
+            break
         }
-        // The first call also starts the engine, which can take a while on slow phones.
-        val reply = send(messenger, EngineProtocol.MSG_CALL, data, timeoutMs + ENGINE_START_ALLOWANCE_MS)
         if (!reply.getBoolean(EngineProtocol.KEY_OK, false)) {
             throw EngineCallException(reply.getString(EngineProtocol.KEY_ERROR) ?: "The Tomato engine failed")
         }
@@ -94,7 +106,12 @@ class TomatoEngineClient(
         }
     }
 
-    /** Stops the engine process (needed before switching engine versions). */
+    /**
+     * Stops the engine process (needed before switching engine versions) and waits until it has
+     * ended. Binding again while it was still ending used to reach the old process, which still had
+     * the previous engine loaded, so a new engine version was never really started (and was reported
+     * as not working on the phone).
+     */
     suspend fun shutdown() {
         connectLock.withLock {
             val messenger = service
@@ -104,9 +121,25 @@ class TomatoEngineClient(
                 } catch (_: Exception) {
                     // The process may already be gone.
                 }
+                waitUntilDead(messenger)
             }
             disconnect("The Tomato engine was stopped")
         }
+    }
+
+    /** Waits for the process behind [messenger] to end, then drops the connection to it. */
+    private suspend fun awaitEnd(messenger: Messenger) {
+        waitUntilDead(messenger)
+        connectLock.withLock {
+            if (service === messenger) disconnect("The Tomato engine restarted")
+        }
+    }
+
+    private suspend fun waitUntilDead(messenger: Messenger) {
+        val ended = withTimeoutOrNull(PROCESS_END_TIMEOUT_MS) {
+            while (messenger.binder.isBinderAlive) delay(50)
+        }
+        if (ended == null) Log.w(TAG, "The engine process didn't end in time")
     }
 
     private suspend fun send(messenger: Messenger, what: Int, data: Bundle, timeoutMs: Long): Bundle {
@@ -215,5 +248,7 @@ class TomatoEngineClient(
         const val DEFAULT_TIMEOUT_MS = 60_000L
         private const val ENGINE_START_ALLOWANCE_MS = 110_000L
         private const val BIND_TIMEOUT_MS = 15_000L
+        private const val PROCESS_END_TIMEOUT_MS = 5_000L
+        private const val MAX_RESTARTS = 2
     }
 }

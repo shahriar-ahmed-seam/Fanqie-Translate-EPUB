@@ -1,13 +1,15 @@
 What's fixed
-Scraper and Tomato
-- The app no longer crashes when you open the Scraper browser after using the Tomato tab.
-- Looking up a novel by ID is reliable: it retries while the downloader engine is starting, asks Fanqie's website when the engine can't answer, and shows which ID it looked up. IDs typed with other digits (Bengali, full-width) or copied with hidden characters work, and a number that isn't a valid ID gets a clear message instead of unrelated search results.
+Tomato downloads
+- Downloads no longer get stuck (for example at 0 of 250 chapters). When Android restarted the downloader engine, it paused its downloads and waited for a button the app doesn't have; the app now continues them by itself from where they stopped.
+- "Check for update" in the Tomato engine settings works: the new engine (29 October) now starts. New installs get it directly.
+- A failed engine update no longer leaves the app without an engine ("The Tomato engine isn't installed"). The engine that worked is kept until the new one has started.
+- A download that makes no progress for a few minutes says so and suggests checking the internet connection.
 
 Translation
-- Chapters no longer come out as [""]: empty answers from Google are retried instead of being saved.
-- Paragraphs, words and chapter titles that Google left in Chinese are translated again until they are English.
-- Chunks that fail are retried automatically before a book is marked as failed.
-- Exported EPUBs: chapters whose file names have Chinese or special characters are now translated, and the table of contents is fully in English.
-- Books you translated with earlier versions are fixed automatically: chapters showing [""] are translated again the first time the app opens with internet, and Chinese left in other chapters is translated in the background while no other book is translating. Your books stay readable meanwhile.
+- Short chapters whose text is outside paragraph tags are now translated too.
 
-Installing: this version installs over 1.0.11 and newer and keeps your library. Versions 1.0.10 or older must be uninstalled first (different signing key).
+Also in 1.2.1
+- No more crash when opening the Scraper browser; reliable novel ID lookup.
+- Chapters no longer come out as [""]; Chinese left in translations is translated again; failed parts are retried automatically.
+
+If the Tomato tab says the engine isn't installed, tap "Download engine" once.
