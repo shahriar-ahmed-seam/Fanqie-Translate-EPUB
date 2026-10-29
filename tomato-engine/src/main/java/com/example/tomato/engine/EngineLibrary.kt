@@ -25,6 +25,13 @@ object EngineLibrary {
         selectedPath = path
     }
 
+    /** True when this process has a different engine loaded than the one now selected. */
+    fun isOtherEngineLoaded(): Boolean {
+        val loaded = loadedPath ?: return false
+        val selected = selectedPath ?: return false
+        return loaded != selected
+    }
+
     /** Called by the generated `Rust` glue object before any native method runs. */
     @JvmStatic
     @Synchronized

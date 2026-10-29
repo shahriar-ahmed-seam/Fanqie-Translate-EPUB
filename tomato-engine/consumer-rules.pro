@@ -30,6 +30,8 @@
 # Plugins are created by class name and their commands are found by reflection.
 -keep class app.tauri.** { *; }
 -keep class com.pofl.fanqienoveldownloader.FileOpenerPlugin { *; }
+-keep class com.pofl.fanqienoveldownloader.NativeTtsPlugin { *; }
+-keep class com.pofl.fanqienoveldownloader.ListenMediaPlugin { *; }
 -keep class com.pofl.fanqie.accountauth.AccountAuthPlugin { *; }
 -keep class com.example.tomato.engine.EngineLibrary { *; }
 -keepclassmembers class com.example.tomato.engine.EngineBridge$Host {

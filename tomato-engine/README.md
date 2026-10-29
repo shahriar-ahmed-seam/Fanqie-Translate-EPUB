@@ -16,10 +16,12 @@ in a separate process (`:tomato`).
   `com.pofl.fanqienoveldownloader`, so these files must keep that package name. License texts are in
   [`third_party/`](third_party/).
 
-- **`FileOpenerPlugin` / `AccountAuthPlugin`** are our own minimal stand-ins (not the original app's
-  code). The engine registers plugins with these class names at start-up; Fanqie Translate only needs
-  lookups and downloads, so the file pickers, sharing, APK install and account login they would
-  normally provide are answered with "not available".
+- **`FileOpenerPlugin` / `AccountAuthPlugin` / `NativeTtsPlugin` / `ListenMediaPlugin`** are our own
+  minimal stand-ins (not the original app's code). The engine registers plugins with these class
+  names at start-up and doesn't start if one is missing (engine builds from 2026-10-29 on added the
+  last two); Fanqie Translate only needs lookups and downloads, so the file pickers, sharing, APK
+  install, account login, read-aloud and listening controls they would normally provide are answered
+  with "not available".
 
 - **`EngineHost`, `EngineBridge`, `TomatoEngineActivity`, `TomatoEngineService`, `TomatoEngineClient`,
   `EngineLibrary`, `EngineProtocol`, `TomatoEngineProcess`** are our host: they load the engine

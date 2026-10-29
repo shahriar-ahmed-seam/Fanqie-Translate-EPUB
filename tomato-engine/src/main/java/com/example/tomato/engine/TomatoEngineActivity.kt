@@ -8,13 +8,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
  * Hosts the engine's Tauri runtime (the runtime needs an Activity and a WebView). The window is
  * transparent, never takes touches or focus (taps go straight to the app underneath), and moves
- * itself behind the app once the engine answers. The engine keeps working from there.
+ * itself behind the app as soon as its WebView exists. The engine starts and keeps working there.
  */
 class TomatoEngineActivity : TauriActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -39,6 +40,19 @@ class TomatoEngineActivity : TauriActivity() {
         // The downloader's own page keeps running but is never shown.
         webView.alpha = 0f
         EngineBridge.attach(webView)
+        // Step behind the app as soon as the WebView exists; the engine keeps starting there. While
+        // this window is in front, Android has no window to give key input to (this one takes none),
+        // so a Back press during the seconds the engine needs to start made Android report "not
+        // responding" and kill the engine, which left running downloads paused.
+        scope.launch {
+            delay(MOVE_BACK_DELAY_MS)
+            if (!isFinishing) moveTaskToBack(true)
+        }
+    }
+
+    private companion object {
+        /** Lets the first frame happen (the runtime starts the page after the window is shown). */
+        const val MOVE_BACK_DELAY_MS = 300L
     }
 
     override fun onDestroy() {

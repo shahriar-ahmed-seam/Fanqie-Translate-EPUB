@@ -487,7 +487,9 @@ object EpubParser {
 
     /**
      * True when a lot of the chapter's text is outside paragraph-like blocks: at least
-     * [LOOSE_TEXT_MIN_CHARS] characters and a fifth of all text.
+     * [LOOSE_TEXT_MIN_CHARS] characters and a fifth of all text, or (short chapters) at least
+     * [LOOSE_TEXT_SHORT_MIN_CHARS] characters and half of all text. A few stray characters such as
+     * "完" or "（本章完）" don't count.
      */
     fun hasSubstantialLooseText(body: Element): Boolean {
         var loose = 0
@@ -501,10 +503,12 @@ object EpubParser {
                 }
             }
         }, body)
-        return loose >= LOOSE_TEXT_MIN_CHARS && loose * 5 >= total
+        return (loose >= LOOSE_TEXT_MIN_CHARS && loose * 5 >= total) ||
+            (loose >= LOOSE_TEXT_SHORT_MIN_CHARS && loose * 2 >= total)
     }
 
     private const val LOOSE_TEXT_MIN_CHARS = 100
+    private const val LOOSE_TEXT_SHORT_MIN_CHARS = 20
     private val BLOCK_TAGS = setOf("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "dt", "dd")
     private val NON_TEXT_TAGS = setOf("script", "style", "title", "head", "noscript")
 

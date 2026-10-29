@@ -24,6 +24,8 @@ object EngineProtocol {
     const val KEY_STATE = "state"
     const val KEY_MESSAGE = "message"
     const val KEY_LOADED_PATH = "loaded_path"
+    /** In a call reply: this process has another engine version loaded and ends now; call again. */
+    const val KEY_RESTART = "restart"
 
     /** Engine library the process should load (passed when binding). */
     const val EXTRA_ENGINE_PATH = "engine_path"

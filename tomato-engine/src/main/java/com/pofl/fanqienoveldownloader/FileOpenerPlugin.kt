@@ -106,6 +106,33 @@ class FileOpenerPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun deleteContentUri(invoke: Invoke) = notAvailable(invoke)
 
+    // Reader display settings of the original app (engine builds from 2026-10-29 on). The engine's
+    // reader isn't shown inside Fanqie Translate, so they only report that nothing changed.
+
+    @Command
+    fun setReaderFullscreen(invoke: Invoke) = resolveSetting(invoke, "native", false)
+
+    @Command
+    fun setReaderKeepScreenOn(invoke: Invoke) = resolveSetting(invoke, "native", false)
+
+    @Command
+    fun setReaderVolumeKeys(invoke: Invoke) = resolveSetting(invoke, "supported", false)
+
+    @Command
+    fun setScreenOrientation(invoke: Invoke) {
+        val result = JSObject()
+        result.put("mode", "auto")
+        result.put("fullscreen", false)
+        invoke.resolve(result)
+    }
+
+    private fun resolveSetting(invoke: Invoke, key: String, value: Boolean) {
+        val result = JSObject()
+        result.put("enabled", false)
+        result.put(key, value)
+        invoke.resolve(result)
+    }
+
     private fun resolveEmptyLabel(invoke: Invoke) {
         val result = JSObject()
         result.put("label", "")

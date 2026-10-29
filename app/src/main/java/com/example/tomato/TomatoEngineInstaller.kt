@@ -108,7 +108,12 @@ class TomatoEngineInstaller(
         extract(tag, abi, apk, apk.sha256Hex())
     }
 
-    fun makeCurrent(engine: InstalledEngine) {
+    /**
+     * Uses [engine] from now on. With [deletePrevious] the engine used before is deleted; an update
+     * keeps it until the new one has started (and goes back to it if it doesn't). Deleting it right
+     * away used to leave no engine at all after a failed update.
+     */
+    fun makeCurrent(engine: InstalledEngine, deletePrevious: Boolean = true) {
         val previous = installed()
         root.mkdirs()
         val json = JSONObject().put(
@@ -127,7 +132,7 @@ class TomatoEngineInstaller(
             tmp.delete()
         }
         // Keep only the current engine on disk.
-        if (previous != null && previous.path != engine.path) deleteEngineFiles(previous)
+        if (deletePrevious && previous != null && previous.path != engine.path) deleteEngineFiles(previous)
         AppDiagnostics.log("tomato", "Engine ${engine.label} (${engine.abi}) is now in use")
     }
 
@@ -292,16 +297,16 @@ class TomatoEngineInstaller(
             "Java_com_pofl_fanqienoveldownloader_RustWebChromeClient_onPermissionRequestNative"
         )
 
-        private const val PINNED_TAG = "unsigned-v2026.10.25-1124-r760"
-        private const val PINNED_VERSION = "2026.10.25-1124"
+        private const val PINNED_TAG = "unsigned-v2026.10.29-1422-r774"
+        private const val PINNED_VERSION = "2026.10.29-1422"
 
         /** The engine build this app version was tested with (used for first installs). */
         val PINNED_RELEASE = EngineRelease(
             tag = PINNED_TAG,
             assets = mapOf(
-                "arm64-v8a" to pinnedAsset("arm64-v8a", 18_978_532, "5d28e2c43d9df67a864ba66779b54776bb2c2eff15f20d2b91699a0e2f052f0e"),
-                "armeabi-v7a" to pinnedAsset("armeabi-v7a", 15_128_408, "7d46c3617cbb7b8300b169e70ac4a066d84b3100b99f28c9768b1e715efc0c2a"),
-                "x86_64" to pinnedAsset("x86_64", 20_748_282, "ecc07cc4963e1d55c181834f97479fd8664d2bce8d4b32fc8148751774f697c2")
+                "arm64-v8a" to pinnedAsset("arm64-v8a", 20_916_698, "1726f6ad8b751e49c4b579874c3ca9e8bbe60c4d91470b1ce92436923676e9b3"),
+                "armeabi-v7a" to pinnedAsset("armeabi-v7a", 16_623_480, "5f26917a61f5fd722178cb440c44d992eff8fd65119783489da97393c931638b"),
+                "x86_64" to pinnedAsset("x86_64", 23_003_497, "8814901fd35d46f6dd9eed6587e9c8e53b18a016f0cd85d8816ecb12274bca4a")
             )
         )
 

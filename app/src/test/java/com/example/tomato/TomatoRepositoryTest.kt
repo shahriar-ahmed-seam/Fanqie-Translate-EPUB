@@ -212,6 +212,19 @@ class TomatoRepositoryTest {
     }
 
     @Test
+    fun aDownloadPausedByAnEngineRestartContinuesByItself() = runBlocking {
+        engine.holdRunning = true
+        repository.download(book)
+        awaitState(TomatoState.DOWNLOADING)
+        // The engine process restarts: its download comes back paused (it used to stay stuck there).
+        engine.pauseAllOnNextList = true
+        withTimeout(10_000) { while (engine.resumed.isEmpty()) delay(10) }
+        engine.holdRunning = false
+        awaitState(TomatoState.DOWNLOADED)
+        assertEquals(listOf("job-1"), engine.resumed.distinct())
+    }
+
+    @Test
     fun cancelStopsTheEngineJob() = runBlocking {
         engine.holdRunning = true
         repository.download(book)
@@ -283,6 +296,9 @@ class TomatoRepositoryTest {
         var detailCalls = 0
         var searchCalls = 0
         var lastSearch: String? = null
+        /** The next list_jobs pauses every running job, as the engine does after its process restarted. */
+        @Volatile var pauseAllOnNextList = false
+        val resumed = CopyOnWriteArrayList<String>()
         private val jobs = mutableMapOf<String, JSONObject>()
         private var polls = 0
 
@@ -312,12 +328,24 @@ class TomatoRepositoryTest {
                     jobs[id] = job
                     job.toString()
                 }
+                "resume_job" -> {
+                    val id = payload.getString("job_id")
+                    resumed.add(id)
+                    jobs[id]?.put("status", "running")
+                    """{"ok":true}"""
+                }
                 "list_jobs" -> {
                     polls++
+                    // As after an engine restart: running downloads come back paused.
+                    if (pauseAllOnNextList) {
+                        pauseAllOnNextList = false
+                        jobs.values.filter { it.optString("status") !in setOf("canceled", "done", "failed") }
+                            .forEach { it.put("status", "paused").put("message", "已恢复退出前的任务，点击“继续”从已保存进度下载") }
+                    }
                     val items = JSONArray()
                     jobs.values.forEach { job ->
                         when {
-                            job.optString("status") in setOf("canceled", "done", "failed") -> Unit
+                            job.optString("status") in setOf("canceled", "done", "failed", "paused") -> Unit
                             holdRunning || polls % 2 == 1 -> job.put("status", "running").put("progress", 33).put("progress_done", 1).put("progress_total", 3)
                             job.optBoolean("fail") -> job.put("status", "failed").put("message", "章节下载失败")
                             else -> {

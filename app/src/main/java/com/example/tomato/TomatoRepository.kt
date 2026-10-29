@@ -90,6 +90,11 @@ class TomatoRepository(
     private val root = File(context.filesDir, "tomato")
     private val pollLock = Mutex()
     private var pollJob: Job? = null
+    /** When each paused engine job was last asked to continue. */
+    private val resumeRequests = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    /** Each running job's chapter count and when it last changed (to tell a stalled download). */
+    private val progressSeen = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
+    private val stallLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private val _engineSetup = MutableStateFlow<EngineSetup>(EngineSetup.Checking)
     val engineSetup: StateFlow<EngineSetup> = _engineSetup.asStateFlow()
@@ -164,26 +169,44 @@ class TomatoRepository(
             return@withContext "The engine is up to date (${current.label})."
         }
         val candidate = installer.download(latest, onProgress)
-        engine.shutdown()
-        installer.makeCurrent(candidate)
-        val works = try {
-            engine.call("list_jobs", JSONObject(), 45_000L)
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "New engine ${candidate.tag} didn't start", e)
-            false
-        }
-        if (works) {
-            _engineSetup.value = EngineSetup.Ready(candidate)
+        if (tryEngine(candidate, keepPrevious = true)) {
+            installer.discard(current)
             "Updated the engine to ${candidate.label}."
         } else {
-            engine.shutdown()
-            installer.makeCurrent(current)
+            switchTo(current)
             installer.discard(candidate)
-            _engineSetup.value = EngineSetup.Ready(current)
             AppDiagnostics.log("tomato", "Engine ${candidate.tag} rejected after a failed start; kept ${current.tag}")
             "The new engine (${candidate.label}) didn't work on this phone, so ${current.label} is still in use."
         }
+    }
+
+    /**
+     * Makes [candidate] the engine in use and starts it once. True when it answered; on false the
+     * caller goes back to the previous engine (kept on disk with [keepPrevious]).
+     */
+    private suspend fun tryEngine(candidate: InstalledEngine, keepPrevious: Boolean): Boolean {
+        val installer = installer ?: return false
+        engine.shutdown()
+        installer.makeCurrent(candidate, deletePrevious = !keepPrevious)
+        return try {
+            engine.call("list_jobs", JSONObject(), ENGINE_START_CHECK_MS)
+            _engineSetup.value = EngineSetup.Ready(candidate)
+            AppDiagnostics.log("tomato", "Engine ${candidate.label} started")
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Engine ${candidate.tag} didn't start", e)
+            AppDiagnostics.log("tomato", "Engine ${candidate.label} didn't start: ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun switchTo(previous: InstalledEngine) {
+        val installer = installer ?: return
+        engine.shutdown()
+        installer.makeCurrent(previous, deletePrevious = false)
+        _engineSetup.value = EngineSetup.Ready(previous)
     }
 
     suspend fun removeEngine() {
@@ -483,7 +506,15 @@ class TomatoRepository(
             job.isFailed -> settleAfterStop(book, TomatoState.FAILED, job.message.ifBlank { "The download failed" })
             job.isCanceled -> settleAfterStop(book, TomatoState.CANCELED, "Download canceled")
             else -> {
+                if (job.isPaused) resumeJob(job)
                 val total = if (job.total > 0) job.total else book.chapterCount
+                val stalledMs = stallTime(job)
+                val message = when {
+                    job.isPaused -> "Continuing where it stopped…"
+                    stalledMs >= STALL_HINT_MS ->
+                        "No progress for ${stalledMs / 60_000} min (${job.done} of $total). Check the internet connection; the download continues by itself."
+                    else -> progressMessage(job.done, total)
+                }
                 dao.upsert(
                     book.copy(
                         state = TomatoState.DOWNLOADING,
@@ -491,11 +522,52 @@ class TomatoRepository(
                         progressPercent = job.percent,
                         progressDone = job.done,
                         progressTotal = total,
-                        message = if (job.isPaused) "Paused" else progressMessage(job.done, total),
+                        message = message,
                         updatedAt = System.currentTimeMillis()
                     )
                 )
             }
+        }
+    }
+
+    /**
+     * How long [job] has been running without a new chapter. The first time it passes
+     * [STALL_HINT_MS], the engine's own status text is written to the diagnostics log (it says why,
+     * for example a blocked network), so a report from Settings shows the reason.
+     */
+    private fun stallTime(job: TomatoJob): Long {
+        val now = System.currentTimeMillis()
+        val seen = progressSeen[job.id]
+        if (seen == null || seen.first != job.done) {
+            progressSeen[job.id] = job.done to now
+            stallLogged.remove(job.id)
+            return 0L
+        }
+        val stalled = now - seen.second
+        if (stalled >= STALL_HINT_MS && stallLogged.add(job.id)) {
+            AppDiagnostics.log("tomato", "Download ${job.id} (${job.bookId}) has made no progress for ${stalled / 1000}s at ${job.done}/${job.total}: ${job.message}")
+        }
+        return stalled
+    }
+
+    /**
+     * Continues a paused download. Fanqie Translate never pauses downloads: the engine pauses the
+     * downloads it restores after its process was restarted (Android stopped it, or the app was
+     * closed) and waits for its "Continue" button, which the app doesn't have. Those downloads used
+     * to stay stuck forever. Asked again at most every [RESUME_RETRY_MS] until the job runs.
+     */
+    private suspend fun resumeJob(job: TomatoJob) {
+        val now = System.currentTimeMillis()
+        val last = resumeRequests[job.id]
+        if (last != null && now - last < RESUME_RETRY_MS) return
+        resumeRequests[job.id] = now
+        try {
+            engine.call("resume_job", JSONObject().put("job_id", job.id), 30_000L)
+            AppDiagnostics.log("tomato", "Continued download ${job.id} for ${job.bookId} at ${job.done}/${job.total}")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't continue download ${job.id}", e)
         }
     }
 
@@ -680,6 +752,10 @@ class TomatoRepository(
         const val MAX_POLL_FAILURES = 6
         const val MISSING_JOB_ROUNDS = 8
         const val LOOKUP_TIMEOUT_MS = 30_000L
+        const val ENGINE_START_CHECK_MS = 45_000L
+        const val RESUME_RETRY_MS = 10_000L
+        /** A running download without a new chapter for this long gets a hint in its status. */
+        const val STALL_HINT_MS = 120_000L
         /** Engine failures faster than this are worth retrying during a lookup. */
         const val QUICK_FAILURE_MS = 10_000L
     }

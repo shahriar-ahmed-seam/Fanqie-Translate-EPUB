@@ -247,5 +247,20 @@ class EpubRebuilderTest {
     fun aFewLooseCharactersDoNotChangeHowAChapterIsRead() {
         val xhtml = "<html><body><h1>第一章</h1><p>甲段。</p><p>乙段。</p>完<br/></body></html>"
         assertEquals(listOf("第一章", "甲段。", "乙段。"), importedParagraphs(xhtml))
+        val ending = "<html><body><h1>第一章</h1><p>他推开门走了进去，屋里一片漆黑。</p><p>桌子上放着一封信。</p>（本章完）</body></html>"
+        assertEquals(3, importedParagraphs(ending).size)
+    }
+
+    @Test
+    fun aShortChapterWithItsTextOutsideParagraphsIsReadLineByLine() {
+        // 97 characters outside paragraph tags: most of the chapter (seen in real books).
+        val lines = listOf(
+            "青石镇比他想象中还要小，一条主街从镇口一直延伸到河边。",
+            "街道两旁是低矮的老房子，屋檐下挂着褪色的红灯笼。",
+            "他按照信上的地址，一路打听，终于找到了东街七十二号。",
+            "那是一间破旧的木屋，门上的锁已经生锈了。"
+        )
+        val xhtml = "<html><body><h2>第二章 青石镇</h2><div>${lines.joinToString("<br/>")}</div></body></html>"
+        assertEquals(listOf("第二章 青石镇") + lines, importedParagraphs(xhtml))
     }
 }

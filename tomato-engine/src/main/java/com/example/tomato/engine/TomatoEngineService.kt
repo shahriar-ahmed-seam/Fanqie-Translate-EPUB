@@ -69,6 +69,18 @@ class TomatoEngineService : Service() {
         val payload = data.getString(EngineProtocol.KEY_PAYLOAD) ?: "{}"
         val timeoutMs = data.getLong(EngineProtocol.KEY_TIMEOUT_MS, 60_000L)
         val result = Bundle()
+        if (EngineLibrary.isOtherEngineLoaded()) {
+            // The app switched engine versions but reached this process before it ended. A loaded
+            // engine can't be replaced: tell the app to call again, and end so a new process starts.
+            Log.i(TAG, "Another engine version was selected; restarting the engine process")
+            result.putBoolean(EngineProtocol.KEY_OK, false)
+            result.putBoolean(EngineProtocol.KEY_RESTART, true)
+            result.putString(EngineProtocol.KEY_ERROR, "The Tomato engine is restarting")
+            reply(replyTo, EngineProtocol.MSG_CALL_RESULT, requestId, result)
+            EngineHost.shutdown()
+            Handler(Looper.getMainLooper()).postDelayed({ Process.killProcess(Process.myPid()) }, 100)
+            return
+        }
         try {
             EngineHost.ensureRunning(this)
             val json = EngineBridge.call(action, payload, timeoutMs)
