@@ -65,6 +65,13 @@ android {
     unitTests {
       isIncludeAndroidResources = true
       all { testTask ->
+        // Failing tests print their full exception (with causes and suppressed ones) in the CI log.
+        testTask.testLogging {
+          events("failed")
+          exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+          showCauses = true
+          showStackTraces = true
+        }
         val customCacerts = file("/home/shahriar/.jdk/jdk-21/usr/lib/jvm/java-21-openjdk-amd64/lib/security/cacerts")
         if (customCacerts.exists()) {
           testTask.systemProperty("javax.net.ssl.trustStore", customCacerts.absolutePath)

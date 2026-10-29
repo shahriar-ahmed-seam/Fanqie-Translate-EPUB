@@ -13,7 +13,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+// A plain Application: the app's own (queue, TTS) isn't needed and would keep running after the test.
+@Config(sdk = [34], application = android.app.Application::class)
 class ChunkTranslatorTest {
 
     private val zh = listOf("他推开门走了进去，屋里一片漆黑。", "桌子上放着一封信，信封已经发黄了。", "他拿起信，手微微发抖。")

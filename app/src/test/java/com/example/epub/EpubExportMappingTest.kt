@@ -28,7 +28,8 @@ import java.util.zip.ZipOutputStream
 
 /** Exports of books whose chapter files have non-ASCII names (hrefs URL-encoded in the OPF). */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+// A plain Application: the app's own (queue, TTS) isn't needed and would keep running after the test.
+@Config(sdk = [34], application = android.app.Application::class)
 class EpubExportMappingTest {
     @get:Rule
     val temp = TemporaryFolder()
